@@ -1,0 +1,24 @@
+# config.yaml — MarketDataPipeline configuration
+# All keys have defaults in pipeline.py — only override what you need.
+
+data_dir: "./data"
+
+# ---- Fetch settings ----
+interval: "1d"          # yfinance interval: 1m 5m 1h 1d 1wk 1mo
+use_cache: true         # skip re-download if raw CSV already exists
+
+# ---- Cleaning settings ----
+timezone: "US/Eastern"
+target_freq: "D"        # Pandas offset alias for frequency alignment
+resample_method: "ffill"
+fill_method: "ffill"
+max_gap: 5              # Max consecutive NaN bars to fill (null = unlimited)
+return_method: "log"    # "log" (preferred) or "simple"
+
+# ---- Symbol watchlist (used as default when run() called without symbols) ----
+watchlist:
+  - AAPL
+  - GOOGL
+  - MSFT
+  - SPY
+  - "^GSPC"   # S&P 500 index
