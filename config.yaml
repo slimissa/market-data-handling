@@ -1,24 +1,43 @@
-# config.yaml — MarketDataPipeline configuration
-# All keys have defaults in pipeline.py — only override what you need.
-
-data_dir: "./data"
+# config.yaml — QuantOS Market Data Pipeline
+# All keys have fallback defaults in pipeline.py
 
 # ---- Fetch settings ----
-interval: "1d"          # yfinance interval: 1m 5m 1h 1d 1wk 1mo
-use_cache: true         # skip re-download if raw CSV already exists
+data_dir:  "./data"
+interval:  "1d"           # yfinance: 1m 5m 1h 1d 1wk 1mo
+use_cache: true           # skip re-download if raw CSV already exists
 
 # ---- Cleaning settings ----
-timezone: "US/Eastern"
-target_freq: "D"        # Pandas offset alias for frequency alignment
+timezone:        "US/Eastern"
+target_freq:     "D"      # pandas offset alias
 resample_method: "ffill"
-fill_method: "ffill"
-max_gap: 5              # Max consecutive NaN bars to fill (null = unlimited)
-return_method: "log"    # "log" (preferred) or "simple"
+fill_method:     "ffill"
+max_gap:         5        # max consecutive NaN bars to fill
+return_method:   "log"    # "log" (preferred) or "simple"
 
-# ---- Symbol watchlist (used as default when run() called without symbols) ----
+# ---- Feature engineering ----
+features:
+  volatility:
+    windows: [5, 21, 63]  # trading days: ~1wk, ~1mo, ~1qtr
+  rsi:
+    window: 14             # Wilder's standard
+  atr:
+    window: 14             # Wilder's standard
+  volume:
+    window: 20             # rolling average for vol_ratio and VWAP
+  bollinger:
+    window:  20
+    num_std: 2.0           # bands at ±2 sigma
+  macd:
+    fast:   12
+    slow:   26
+    signal: 9              # classic 12/26/9 configuration
+  price_zscore:
+    windows: [20, 60]      # short (mean-reversion) and medium (trend)
+
+# ---- Symbol watchlist ----
 watchlist:
   - AAPL
   - GOOGL
   - MSFT
   - SPY
-  - "^GSPC"   # S&P 500 index
+  - "^GSPC"               # S&P 500 index
