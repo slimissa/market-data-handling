@@ -290,11 +290,12 @@ Key tests include:
 | **Phase 2** | ✅ Complete | Feature engineering — 7 families, 24 columns, 49 tests |
 | **Phase 3** | ✅ Complete | Signal generation — 6 families, ensemble, 58 tests |
 | **Phase 4** | ✅ Complete | Backtesting — dual-engine, full metrics, cross-ticker comparison, 48 tests |
-| **Phase 5** | 🔜 Next | Factor attribution — CAPM, Fama-French, regime analysis |
-| **Phase 6** | Planned | Regime detection — trending vs range-bound market classification |
-| **Phase 7** | Planned | Portfolio layer — multi-asset simultaneous backtest, risk management |
-| **Phase 8** | Planned | Research report — automated tear sheet PDF/DOCX from backtest results |
-| **Phase 9** | Planned | QuantOS integration — CLI commands via `lass_sh` |
+| **Phase 5** | 🔜 Next | Factor attribution — CAPM, Fama-French, benchmark integration, rolling window analysis |
+| **Phase 6** | Planned | Regime detection — trending vs range-bound classification, adaptive signal switching |
+| **Phase 7** | Planned | ML signal (optional) — XGBoost/Random Forest on 24 features, walk-forward validation |
+| **Phase 8** | Planned | Portfolio layer — multi-asset simultaneous backtest, risk management, allocation |
+| **Phase 9** | Planned | Research report — automated tear sheet PDF/DOCX from backtest results |
+| **Phase 10** | Planned | QuantOS integration — CLI commands via `lass_sh` |
 
 ---
 
