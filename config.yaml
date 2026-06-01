@@ -68,3 +68,10 @@ signals:
     max_bars: 20   # force exit after N bars regardless of signal
   ensemble:
     method: "majority_vote"   # majority_vote | weighted | regime_switch
+
+# ---- Backtesting ----
+backtest:
+  initial_capital:  100_000
+  position_sizing:  "fixed_notional"   # fixed_shares | fixed_notional | vol_target
+  target_notional:  100_000
+  cost_model:       "liquid_equity"    # zero | liquid_equity | small_cap

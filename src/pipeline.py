@@ -1,5 +1,5 @@
 """
-pipeline.py — Orchestrates fetch → clean → feature engineering → save
+pipeline.py — Orchestrates fetch → clean → engineer → signal → backtest → save
 QuantOS Market Data Pipeline
 
 Usage:
@@ -20,6 +20,7 @@ from data_fetcher import MarketDataFetcher
 from data_cleaner import DataCleaner
 from feature_engineering import FeatureEngineer
 from signal_generator import SignalGenerator
+from backtester import VectorisedBacktester, TransactionCostModel
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,20 +38,9 @@ class MarketDataPipeline:
         1. Fetch      — yfinance API or local CSV cache
         2. Clean      — timestamps, alignment, missing data, returns
         3. Engineer   — volatility, RSI, ATR, volume, Bollinger, MACD, z-score
-        4. Persist    — processed CSV + JSON quality reports
-
-    Config keys (config.yaml):
-        data_dir        str   "./data"
-        interval        str   "1d"
-        timezone        str   "UTC"
-        target_freq     str   "D"
-        resample_method str   "ffill"
-        fill_method     str   "ffill"
-        max_gap         int   5
-        return_method   str   "log"
-        use_cache       bool  true
-        watchlist       list  ["AAPL", ...]
-        features        dict  (see DEFAULTS below)
+        4. Signal     — RSI, MACD, z-score, Bollinger, vol scale, ensemble
+        5. Backtest   — vectorised + event-driven, per-signal comparison
+        6. Persist    — processed CSV + JSON quality reports + backtest CSVs
     """
 
     DEFAULTS = {
@@ -82,6 +72,12 @@ class MarketDataPipeline:
             "holding":   {"min_bars": 2, "max_bars": 20},
             "ensemble":  {"method": "majority_vote"},
         },
+        "backtest": {
+            "initial_capital":  100_000,
+            "position_sizing":  "fixed_notional",
+            "target_notional":  100_000,
+            "cost_model":       "liquid_equity",
+        },
     }
 
     def __init__(self, config_path: str = "config.yaml"):
@@ -92,20 +88,42 @@ class MarketDataPipeline:
         else:
             with open(config_path) as fh:
                 loaded = yaml.safe_load(fh) or {}
-            # Deep merge features sub-dict
             merged = dict(self.DEFAULTS)
-            merged.update({k: v for k, v in loaded.items() if k != "features"})
+            merged.update({k: v for k, v in loaded.items()
+                          if k not in ("features", "signals", "backtest")})
             if "features" in loaded:
                 merged["features"] = {**self.DEFAULTS["features"], **loaded["features"]}
             if "signals" in loaded:
                 merged["signals"] = {**self.DEFAULTS["signals"], **loaded["signals"]}
+            if "backtest" in loaded:
+                merged["backtest"] = {**self.DEFAULTS["backtest"], **loaded["backtest"]}
             self.config = merged
 
-        self.fetcher  = MarketDataFetcher(self.config["data_dir"])
-        self.cleaner  = DataCleaner()
-        self.engineer = FeatureEngineer()
+        self.fetcher    = MarketDataFetcher(self.config["data_dir"])
+        self.cleaner    = DataCleaner()
+        self.engineer   = FeatureEngineer()
         self.signal_gen = SignalGenerator()
-        self._data_dir = Path(self.config["data_dir"])
+        self._data_dir  = Path(self.config["data_dir"])
+
+        # Backtester
+        bt_cfg = self.config["backtest"]
+        cost_model_map = {
+            "zero":           TransactionCostModel.zero,
+            "liquid_equity":  TransactionCostModel.liquid_equity,
+            "small_cap":      TransactionCostModel.small_cap,
+        }
+        cost_model = cost_model_map.get(
+            bt_cfg["cost_model"], TransactionCostModel.liquid_equity
+        )()
+        self.backtester = VectorisedBacktester(
+            initial_capital=bt_cfg["initial_capital"],
+            position_sizing=bt_cfg["position_sizing"],
+            target_notional=bt_cfg["target_notional"],
+            cost_model=cost_model,
+        )
+
+        # Ensure output directories
+        (self._data_dir / "results").mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------ #
     # Public API                                                           #
@@ -121,9 +139,10 @@ class MarketDataPipeline:
         Execute the full pipeline for `symbols`.
 
         Falls back to config['watchlist'] when symbols is None.
-        Returns a dict of fully-processed, feature-enriched DataFrames.
+        Returns a dict of fully-processed, backtested DataFrames.
         """
-        symbols = symbols or self.config["watchlist"]
+        if symbols is None:
+            symbols = self.config["watchlist"]
         if not symbols:
             raise ValueError("No symbols provided and watchlist is empty.")
 
@@ -138,9 +157,10 @@ class MarketDataPipeline:
             use_cache=self.config["use_cache"],
         )
 
-        # ---- Stages 2-3: Clean + Engineer ----
+        # ---- Stages 2-5: Clean → Engineer → Signal → Backtest ----
         processed: Dict[str, pd.DataFrame] = {}
         feat_cfg = self.config["features"]
+        sig_cfg  = self.config["signals"]
 
         for symbol, df in raw_data.items():
             try:
@@ -173,7 +193,6 @@ class MarketDataPipeline:
                 )
 
                 # Stage 4: Signal generation
-                sig_cfg = self.config["signals"]
                 df_signals = self.signal_gen.generate_all(
                     df_feat,
                     ticker=symbol,
@@ -196,13 +215,23 @@ class MarketDataPipeline:
                     ensemble_method=sig_cfg["ensemble"]["method"],
                 )
 
-                # Stage 5: Persist
+                # Stage 5: Backtest
+                comparison = self.backtester.compare_signals(
+                    df_signals, ticker=symbol
+                )
+                self._save_backtest(comparison, symbol)
+
+                # Stage 6: Persist
                 self._save(df_signals, symbol)
                 self._save_reports(df_clean, df_feat, df_signals, symbol)
                 processed[symbol] = df_signals
 
             except Exception as exc:
                 logger.error(f"[{symbol}] Processing failed: {exc}", exc_info=True)
+
+        # ---- Cross-watchlist comparison ----
+        if len(processed) >= 2:
+            self._save_watchlist_comparison(processed)
 
         logger.info(
             f"Pipeline complete — "
@@ -226,7 +255,7 @@ class MarketDataPipeline:
         df_signals: pd.DataFrame,
         symbol: str,
     ) -> None:
-        # Data quality report (from cleaner)
+        # Data quality report
         clean_report = self.cleaner.quality_report(df_clean, ticker=symbol)
         clean_out = self._data_dir / "processed" / f"{symbol}_data_report.json"
         with open(clean_out, "w") as fh:
@@ -249,6 +278,37 @@ class MarketDataPipeline:
             "data_report.json, feature_report.json, signal_report.json"
         )
 
+    def _save_backtest(self, comparison: pd.DataFrame, symbol: str) -> None:
+        out = self._data_dir / "results" / f"{symbol}_backtest.csv"
+        comparison.to_csv(out)
+        logger.info(f"[{symbol}] Backtest results → {out}")
+
+    def _save_watchlist_comparison(
+        self, processed: Dict[str, pd.DataFrame]
+    ) -> None:
+        """Build comparison table across all tickers for the ensemble signal."""
+        rows = []
+        for symbol, df in processed.items():
+            try:
+                result = self.backtester.run(
+                    df, signal_col="signal_ensemble", ticker=symbol
+                )
+                row = {"ticker": symbol, **result.metrics}
+                rows.append(row)
+            except Exception as exc:
+                logger.warning(f"[{symbol}] Ensemble backtest failed: {exc}")
+
+        if not rows:
+            return
+
+        comparison = pd.DataFrame(rows).set_index("ticker")
+        if "sharpe" in comparison.columns:
+            comparison = comparison.sort_values("sharpe", ascending=False)
+
+        out = self._data_dir / "results" / "watchlist_comparison.csv"
+        comparison.round(4).to_csv(out)
+        logger.info(f"Watchlist comparison → {out}")
+
 
 # ======================================================================
 # CLI
@@ -264,7 +324,7 @@ if __name__ == "__main__":
 
     pipeline = MarketDataPipeline(args.config)
     results  = pipeline.run(
-        symbols=args.symbols or None,
+        symbols=args.symbols if args.symbols else None,
         start_date=args.start,
         end_date=args.end,
     )
@@ -277,9 +337,22 @@ if __name__ == "__main__":
                      if c not in base and not c.startswith("signal_")
                      and c != "position_scale"]
         sig_cols  = [c for c in df.columns if c.startswith("signal_")]
+
+        # Load backtest for quick Sharpe
+        bt_path = pipeline._data_dir / "results" / f"{ticker}_backtest.csv"
+        sharpe_str = ""
+        if bt_path.exists():
+            try:
+                bt_df = pd.read_csv(bt_path, index_col=0)
+                if "signal_ensemble" in bt_df.index:
+                    sharpe_val = bt_df.loc["signal_ensemble", "sharpe"]
+                    sharpe_str = f"  Sharpe={sharpe_val:+.2f}"
+            except Exception:
+                pass
+
         print(
             f"  {ticker:6s}  rows={len(df):5d}  "
             f"features={len(feat_cols):2d}  "
             f"signals={len(sig_cols):2d}  "
-            f"total_cols={df.shape[1]}"
+            f"total_cols={df.shape[1]}{sharpe_str}"
         )
