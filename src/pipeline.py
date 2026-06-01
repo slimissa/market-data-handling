@@ -19,6 +19,7 @@ import yaml
 from data_fetcher import MarketDataFetcher
 from data_cleaner import DataCleaner
 from feature_engineering import FeatureEngineer
+from signal_generator import SignalGenerator
 
 logging.basicConfig(
     level=logging.INFO,
@@ -72,6 +73,15 @@ class MarketDataPipeline:
             "macd":        {"fast": 12, "slow": 26, "signal": 9},
             "price_zscore":{"windows": [20, 60]},
         },
+        "signals": {
+            "rsi":       {"oversold": 30, "overbought": 70, "exit": 50, "smoothing": 1},
+            "macd":      {"require_zero_cross": False},
+            "zscore":    {"entry_threshold": 2.0, "exit_threshold": 0.0, "window": 60},
+            "bollinger": {"squeeze_percentile": 20.0, "max_holding_bars": 10},
+            "vol_scale": {"window": 21, "lookback": 252, "floor": 0.0, "ceiling": 2.0},
+            "holding":   {"min_bars": 2, "max_bars": 20},
+            "ensemble":  {"method": "majority_vote"},
+        },
     }
 
     def __init__(self, config_path: str = "config.yaml"):
@@ -87,11 +97,14 @@ class MarketDataPipeline:
             merged.update({k: v for k, v in loaded.items() if k != "features"})
             if "features" in loaded:
                 merged["features"] = {**self.DEFAULTS["features"], **loaded["features"]}
+            if "signals" in loaded:
+                merged["signals"] = {**self.DEFAULTS["signals"], **loaded["signals"]}
             self.config = merged
 
         self.fetcher  = MarketDataFetcher(self.config["data_dir"])
         self.cleaner  = DataCleaner()
         self.engineer = FeatureEngineer()
+        self.signal_gen = SignalGenerator()
         self._data_dir = Path(self.config["data_dir"])
 
     # ------------------------------------------------------------------ #
@@ -159,10 +172,34 @@ class MarketDataPipeline:
                     zscore_windows=feat_cfg["price_zscore"]["windows"],
                 )
 
-                # Stage 4: Persist
-                self._save(df_feat, symbol)
-                self._save_reports(df_clean, df_feat, symbol)
-                processed[symbol] = df_feat
+                # Stage 4: Signal generation
+                sig_cfg = self.config["signals"]
+                df_signals = self.signal_gen.generate_all(
+                    df_feat,
+                    ticker=symbol,
+                    rsi_oversold=sig_cfg["rsi"]["oversold"],
+                    rsi_overbought=sig_cfg["rsi"]["overbought"],
+                    rsi_exit=sig_cfg["rsi"]["exit"],
+                    rsi_smoothing=sig_cfg["rsi"]["smoothing"],
+                    macd_require_zero_cross=sig_cfg["macd"]["require_zero_cross"],
+                    zscore_entry=sig_cfg["zscore"]["entry_threshold"],
+                    zscore_exit=sig_cfg["zscore"]["exit_threshold"],
+                    zscore_window=sig_cfg["zscore"]["window"],
+                    bb_squeeze_percentile=sig_cfg["bollinger"]["squeeze_percentile"],
+                    bb_max_holding_bars=sig_cfg["bollinger"]["max_holding_bars"],
+                    vol_window=sig_cfg["vol_scale"]["window"],
+                    vol_lookback=sig_cfg["vol_scale"]["lookback"],
+                    vol_scale_floor=sig_cfg["vol_scale"]["floor"],
+                    vol_scale_ceiling=sig_cfg["vol_scale"]["ceiling"],
+                    min_holding_bars=sig_cfg["holding"]["min_bars"],
+                    max_holding_bars=sig_cfg["holding"]["max_bars"],
+                    ensemble_method=sig_cfg["ensemble"]["method"],
+                )
+
+                # Stage 5: Persist
+                self._save(df_signals, symbol)
+                self._save_reports(df_clean, df_feat, df_signals, symbol)
+                processed[symbol] = df_signals
 
             except Exception as exc:
                 logger.error(f"[{symbol}] Processing failed: {exc}", exc_info=True)
@@ -186,6 +223,7 @@ class MarketDataPipeline:
         self,
         df_clean: pd.DataFrame,
         df_feat: pd.DataFrame,
+        df_signals: pd.DataFrame,
         symbol: str,
     ) -> None:
         # Data quality report (from cleaner)
@@ -200,7 +238,16 @@ class MarketDataPipeline:
         with open(feat_out, "w") as fh:
             json.dump(feat_report, fh, indent=2, default=str)
 
-        logger.info(f"[{symbol}] Reports saved → data_report.json, feature_report.json")
+        # Signal quality report
+        sig_report = self.signal_gen.signal_report(df_signals, ticker=symbol)
+        sig_out = self._data_dir / "processed" / f"{symbol}_signal_report.json"
+        with open(sig_out, "w") as fh:
+            json.dump(sig_report, fh, indent=2, default=str)
+
+        logger.info(
+            f"[{symbol}] Reports saved → "
+            "data_report.json, feature_report.json, signal_report.json"
+        )
 
 
 # ======================================================================
@@ -224,13 +271,15 @@ if __name__ == "__main__":
 
     print("\n── Summary ─────────────────────────────────────────────────────")
     for ticker, df in results.items():
+        base = {"open","high","low","close","volume","returns",
+                "returns_norm","returns_fwd_1","returns_fwd_5","tr"}
         feat_cols = [c for c in df.columns
-                     if c not in {"open","high","low","close","volume",
-                                  "returns","returns_norm","returns_fwd_1",
-                                  "returns_fwd_5","tr"}]
-        nan_pct = df[feat_cols].isnull().mean().mean() * 100
+                     if c not in base and not c.startswith("signal_")
+                     and c != "position_scale"]
+        sig_cols  = [c for c in df.columns if c.startswith("signal_")]
         print(
             f"  {ticker:6s}  rows={len(df):5d}  "
             f"features={len(feat_cols):2d}  "
-            f"feat_NaN={nan_pct:.1f}%"
+            f"signals={len(sig_cols):2d}  "
+            f"total_cols={df.shape[1]}"
         )

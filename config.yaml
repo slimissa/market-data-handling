@@ -41,3 +41,30 @@ watchlist:
   - MSFT
   - SPY
   - "^GSPC"               # S&P 500 index
+
+# ---- Signal generation ----
+signals:
+  rsi:
+    oversold:   30
+    overbought: 70
+    exit:       50
+    smoothing:  1       # bars RSI must stay beyond threshold before confirming
+  macd:
+    require_zero_cross: false
+  zscore:
+    entry_threshold: 2.0
+    exit_threshold:  0.0
+    window:          60   # use z_price_60d column
+  bollinger:
+    squeeze_percentile: 20.0
+    max_holding_bars:   10
+  vol_scale:
+    window:   21
+    lookback: 252
+    floor:    0.0
+    ceiling:  2.0
+  holding:
+    min_bars: 2    # ignore exits within N bars of entry (avoids whipsaws)
+    max_bars: 20   # force exit after N bars regardless of signal
+  ensemble:
+    method: "majority_vote"   # majority_vote | weighted | regime_switch
