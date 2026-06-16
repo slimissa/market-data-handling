@@ -1,60 +1,52 @@
-# config.yaml — QuantOS Market Data Pipeline
+# config.yaml — QuantOS Market Data Pipeline (Phases 1-5)
 # All keys have fallback defaults in pipeline.py
 
-# ---- Fetch settings ----
+# ── Fetch ────────────────────────────────────────────────────────────────
 data_dir:  "./data"
-interval:  "1d"           # yfinance: 1m 5m 1h 1d 1wk 1mo
-use_cache: true           # skip re-download if raw CSV already exists
+interval:  "1d"        # yfinance: 1m 5m 1h 1d 1wk 1mo
+use_cache: true        # skip re-download if raw CSV already exists
 
-# ---- Cleaning settings ----
+# ── Cleaning ─────────────────────────────────────────────────────────────
 timezone:        "US/Eastern"
-target_freq:     "D"      # pandas offset alias
+target_freq:     "D"       # pandas offset alias
 resample_method: "ffill"
 fill_method:     "ffill"
-max_gap:         5        # max consecutive NaN bars to fill
-return_method:   "log"    # "log" (preferred) or "simple"
+max_gap:         5         # max consecutive NaN bars to fill
+return_method:   "log"     # "log" (preferred) or "simple"
 
-# ---- Feature engineering ----
+# ── Feature engineering ──────────────────────────────────────────────────
 features:
   volatility:
-    windows: [5, 21, 63]  # trading days: ~1wk, ~1mo, ~1qtr
+    windows: [5, 21, 63]   # ~1wk, ~1mo, ~1qtr in trading days
   rsi:
-    window: 14             # Wilder's standard
+    window: 14              # Wilder's standard
   atr:
-    window: 14             # Wilder's standard
+    window: 14
   volume:
-    window: 20             # rolling average for vol_ratio and VWAP
+    window: 20              # rolling avg for vol_ratio and VWAP
   bollinger:
     window:  20
-    num_std: 2.0           # bands at ±2 sigma
+    num_std: 2.0
   macd:
     fast:   12
     slow:   26
-    signal: 9              # classic 12/26/9 configuration
+    signal: 9               # classic 12/26/9
   price_zscore:
-    windows: [20, 60]      # short (mean-reversion) and medium (trend)
+    windows: [20, 60]
 
-# ---- Symbol watchlist ----
-watchlist:
-  - AAPL
-  - GOOGL
-  - MSFT
-  - SPY
-  - "^GSPC"               # S&P 500 index
-
-# ---- Signal generation ----
+# ── Signal generation ────────────────────────────────────────────────────
 signals:
   rsi:
     oversold:   30
     overbought: 70
     exit:       50
-    smoothing:  1       # bars RSI must stay beyond threshold before confirming
+    smoothing:  1           # bars RSI must persist beyond threshold
   macd:
     require_zero_cross: false
   zscore:
     entry_threshold: 2.0
     exit_threshold:  0.0
-    window:          60   # use z_price_60d column
+    window:          60     # use z_price_60d column
   bollinger:
     squeeze_percentile: 20.0
     max_holding_bars:   10
@@ -64,14 +56,41 @@ signals:
     floor:    0.0
     ceiling:  2.0
   holding:
-    min_bars: 2    # ignore exits within N bars of entry (avoids whipsaws)
-    max_bars: 20   # force exit after N bars regardless of signal
+    min_bars: 2             # ignore exits within N bars of entry
+    max_bars: 20            # force exit after N bars regardless
   ensemble:
-    method: "majority_vote"   # majority_vote | weighted | regime_switch
+    method: "majority_vote" # majority_vote | weighted | regime_switch
 
-# ---- Backtesting ----
+# ── Backtesting ──────────────────────────────────────────────────────────
 backtest:
   initial_capital:  100_000
-  position_sizing:  "fixed_notional"   # fixed_shares | fixed_notional | vol_target
+  position_sizing:  "fixed_notional"  # fixed_shares | fixed_notional | vol_target
   target_notional:  100_000
-  cost_model:       "liquid_equity"    # zero | liquid_equity | small_cap
+  cost_model:       "liquid_equity"   # zero | liquid_equity | small_cap
+
+# ── Factor attribution (Phase 5) ─────────────────────────────────────────
+factor:
+  enabled:        true
+  rf_annual:      0.05     # annual risk-free rate (5% ≈ 2024 T-bill)
+  rolling_window: 126      # 6-month rolling CAPM window
+  factors:                 # which factor models to run
+    - MKT                  # CAPM (market only)
+    - SMB                  # Fama-French size factor proxy (IWM - SPY)
+    - HML                  # Fama-French value factor proxy (IWD - IWF)
+    - MOM                  # Carhart momentum factor proxy (MTUM - SPY)
+  cache_dir: "./data/factors"
+
+# ── Watchlist ────────────────────────────────────────────────────────────
+watchlist:
+  - AAPL
+  - GOOGL
+  - MSFT
+  - SPY
+  - "^GSPC"               # S&P 500 index
+
+# ── Regime filtering (Phase 6) ───────────────────────────────────────────
+regime_filter:
+  enabled:          true
+  vol_percentile:   30.0    # mean-reversion signals: active when vol < P30
+  max_trend_annual: 0.10    # suppress mean-reversion when |trend| > 10%/yr
+  bb_percentile:    40.0    # zscore gate: active when bb_width < P40
