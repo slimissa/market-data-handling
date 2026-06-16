@@ -10,4 +10,5 @@ openpyxl==3.1.2  # Excel support
 pytest==7.2.0  # Testing framework
 pytest-cov==3.0.0  # Code coverage for tests
 tzdata==2023.3  # Timezone data for accurate timestamp handling
-
+statsmodels>=0.14.0
+scipy>=1.11.0
