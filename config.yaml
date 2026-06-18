@@ -94,3 +94,12 @@ regime_filter:
   vol_percentile:   30.0    # mean-reversion signals: active when vol < P30
   max_trend_annual: 0.10    # suppress mean-reversion when |trend| > 10%/yr
   bb_percentile:    40.0    # zscore gate: active when bb_width < P40
+  
+
+# ── Regime detection (Phase 7) ───────────────────────────────────────────
+regime:
+  enabled: true
+  method: "rule_based"           # "rule_based" | "hmm"
+  n_states: 3                    # HMM only
+  feature_cols: ["returns", "vol_21d"]  # HMM only
+  adaptive_enabled: true

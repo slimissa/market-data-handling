@@ -25,6 +25,12 @@ from backtester import VectorisedBacktester, TransactionCostModel
 from factor_model import FactorModel, RegimeAnalyser
 from regime_filter import RegimeFilteredEnsemble, RegimeFilterPresets
 
+from regime_detector import (
+    RuleBasedRegimeClassifier,
+    HMMRegimeDetector,
+    AdaptiveSignalSwitch,
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s %(message)s",
@@ -35,13 +41,14 @@ logger = logging.getLogger(__name__)
 
 class MarketDataPipeline:
     """
-    End-to-end market data pipeline — Phases 1-5.
+    End-to-end market data pipeline — Phases 1-7.
 
     Stages:
         1. Fetch          — yfinance API or local CSV cache
         2. Clean          — timestamps, alignment, missing data, returns
         3. Feature Eng.   — vol, RSI, ATR, volume, Bollinger, MACD, z-score
         4. Signal Gen.    — RSI, MACD, z-score, Bollinger, vol scale, ensemble
+        4b. Regime Detect — rule-based or HMM regime classification + adaptive switching
         5. Backtest       — vectorised per-signal comparison + metrics
         6. Factor Model   — CAPM / FF3 / Carhart4 alpha attribution
         7. Regime Analysis— Sharpe per market regime (crisis/trending/range)
@@ -96,6 +103,13 @@ class MarketDataPipeline:
             "max_trend_annual": 0.10,
             "bb_percentile":   40.0,
         },
+        "regime": {
+            "enabled":          True,
+            "method":           "rule_based",
+            "n_states":         3,
+            "feature_cols":     ["returns", "vol_21d"],
+            "adaptive_enabled": True,
+        },
     }
 
     # ------------------------------------------------------------------ #
@@ -113,7 +127,7 @@ class MarketDataPipeline:
             # Shallow merge top-level, deep merge sub-dicts
             merged = dict(self.DEFAULTS)
             for k, v in loaded.items():
-                if k in ("features", "signals", "backtest", "factor"):
+                if k in ("features", "signals", "backtest", "factor", "regime_filter", "regime"):
                     merged[k] = {**self.DEFAULTS.get(k, {}), **v}
                 else:
                     merged[k] = v
@@ -152,6 +166,18 @@ class MarketDataPipeline:
         )
         self.regime_analyser = RegimeAnalyser()
         self.regime_filter_ensemble = RegimeFilteredEnsemble()
+
+        # Regime detection (Phase 7)
+        self.rule_detector = RuleBasedRegimeClassifier()
+        self.hmm_detector = HMMRegimeDetector(
+            n_states=self.config.get("regime", {}).get("n_states", 3),
+            feature_cols=self.config.get("regime", {}).get("feature_cols", ["returns", "vol_21d"]),
+        )
+        self.adaptive_switch = AdaptiveSignalSwitch()
+        self.adaptive_switch.register("trending_up",   "signal_macd")
+        self.adaptive_switch.register("trending_down", "signal_macd")
+        self.adaptive_switch.register("range_bound",   "signal_rsi")
+        self.adaptive_switch.register("crisis",        None)  # flat in crisis
 
     # ------------------------------------------------------------------ #
     # Public API                                                           #
@@ -242,11 +268,29 @@ class MarketDataPipeline:
                     ensemble_method=sig_cfg["ensemble"]["method"],
                 )
 
-                # Stage 4b: Regime filtering
-                rf_cfg = self.config["regime_filter"]
-                if rf_cfg["enabled"]:
-                    df_signals = self.regime_filter_ensemble.apply(df_signals)
-                    logger.info(f"[{symbol}] Regime-filtered signals added.")
+                # Stage 4b: Regime detection (Phase 7)
+                if self.config.get("regime", {}).get("enabled", False):
+                    if self.config["regime"]["method"] == "hmm":
+                        detector = self.hmm_detector
+                        if not detector._fitted:
+                            detector.fit(df_signals)
+                    else:
+                        detector = self.rule_detector
+
+                    result = detector.detect(df_signals)
+                    df_signals["regime_label"] = result.labels
+                    for col in result.probabilities.columns:
+                        df_signals[f"regime_prob_{col}"] = result.probabilities[col]
+
+                    # Adaptive switching
+                    if self.config["regime"].get("adaptive_enabled", True):
+                        df_signals["signal_adaptive"] = self.adaptive_switch.apply(
+                            df_signals, result.probabilities
+                        )
+                    logger.info(
+                        f"[{symbol}] Regime detection complete "
+                        f"({detector.__class__.__name__})."
+                    )
 
                 # Stage 5: Backtest — compare all signals
                 bt_results_map = {}
