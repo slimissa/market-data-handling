@@ -24,11 +24,11 @@ from signal_generator import SignalGenerator
 from backtester import VectorisedBacktester, TransactionCostModel
 from factor_model import FactorModel, RegimeAnalyser
 from regime_filter import RegimeFilteredEnsemble, RegimeFilterPresets
-
 from regime_detector import (
-    RuleBasedRegimeClassifier,
+    RuleBasedClassifier,
     HMMRegimeDetector,
     AdaptiveSignalSwitch,
+    REGIME_NAMES,
 )
 
 logging.basicConfig(
@@ -106,8 +106,8 @@ class MarketDataPipeline:
         "regime": {
             "enabled":          True,
             "method":           "rule_based",
-            "n_states":         3,
-            "feature_cols":     ["returns", "vol_21d"],
+            "n_states":         4,
+            "feature_cols":     ["returns", "vol_21d", "macd_line"],
             "adaptive_enabled": True,
         },
     }
@@ -124,7 +124,6 @@ class MarketDataPipeline:
         else:
             with open(config_path) as fh:
                 loaded = yaml.safe_load(fh) or {}
-            # Shallow merge top-level, deep merge sub-dicts
             merged = dict(self.DEFAULTS)
             for k, v in loaded.items():
                 if k in ("features", "signals", "backtest", "factor", "regime_filter", "regime"):
@@ -159,7 +158,7 @@ class MarketDataPipeline:
 
         # Factor model
         f_cfg = self.config["factor"]
-        self.factor_model   = FactorModel(
+        self.factor_model = FactorModel(
             rf_annual=f_cfg["rf_annual"],
             rolling_window=f_cfg["rolling_window"],
             cache_dir=f_cfg["cache_dir"],
@@ -168,16 +167,19 @@ class MarketDataPipeline:
         self.regime_filter_ensemble = RegimeFilteredEnsemble()
 
         # Regime detection (Phase 7)
-        self.rule_detector = RuleBasedRegimeClassifier()
+        self.rule_detector = RuleBasedClassifier()
         self.hmm_detector = HMMRegimeDetector(
-            n_states=self.config.get("regime", {}).get("n_states", 3),
-            feature_cols=self.config.get("regime", {}).get("feature_cols", ["returns", "vol_21d"]),
+            n_states=self.config.get("regime", {}).get("n_states", 4),
+            feature_cols=self.config.get("regime", {}).get(
+                "feature_cols", ["returns", "vol_21d", "macd_line"]
+            ),
         )
         self.adaptive_switch = AdaptiveSignalSwitch()
-        self.adaptive_switch.register("trending_up",   "signal_macd")
-        self.adaptive_switch.register("trending_down", "signal_macd")
-        self.adaptive_switch.register("range_bound",   "signal_rsi")
-        self.adaptive_switch.register("crisis",        None)  # flat in crisis
+        self.adaptive_switch.register("signal_rsi",   favourable=["range_bound"])
+        self.adaptive_switch.register("signal_zscore", favourable=["range_bound"])
+        self.adaptive_switch.register("signal_macd",  favourable=["trending_up", "trending_down"])
+        self.adaptive_switch.register("signal_bb",    favourable=["trending_up", "trending_down"])
+        # crisis: intentionally unregistered → zero weight for all signals
 
     # ------------------------------------------------------------------ #
     # Public API                                                           #
@@ -195,7 +197,8 @@ class MarketDataPipeline:
         Returns a dict of fully-processed DataFrames (signals + features).
         All results are also saved to disk under data_dir/.
         """
-        symbols = symbols or self.config["watchlist"]
+        if symbols is None:
+            symbols = self.config["watchlist"]
         if not symbols:
             raise ValueError("No symbols provided and watchlist is empty.")
 
@@ -211,8 +214,8 @@ class MarketDataPipeline:
         )
 
         # ---- Stages 2-7 per symbol ----
-        processed:       Dict[str, pd.DataFrame]         = {}
-        backtest_results: Dict[str, Dict]                 = {}
+        processed: Dict[str, pd.DataFrame] = {}
+        backtest_results: Dict[str, Dict] = {}
         daily_returns_all: Dict[str, Dict[str, pd.Series]] = {}
 
         feat_cfg = self.config["features"]
@@ -272,12 +275,13 @@ class MarketDataPipeline:
                 if self.config.get("regime", {}).get("enabled", False):
                     if self.config["regime"]["method"] == "hmm":
                         detector = self.hmm_detector
-                        if not detector._fitted:
+                        if not detector._is_fitted:
                             detector.fit(df_signals)
+                        result = detector.predict(df_signals, online=True)
                     else:
                         detector = self.rule_detector
+                        result = detector.classify(df_signals)
 
-                    result = detector.detect(df_signals)
                     df_signals["regime_label"] = result.labels
                     for col in result.probabilities.columns:
                         df_signals[f"regime_prob_{col}"] = result.probabilities[col]
@@ -289,7 +293,7 @@ class MarketDataPipeline:
                         )
                     logger.info(
                         f"[{symbol}] Regime detection complete "
-                        f"({detector.__class__.__name__})."
+                        f"({result.method})."
                     )
 
                 # Stage 5: Backtest — compare all signals
@@ -313,8 +317,8 @@ class MarketDataPipeline:
                         {sig: res.metrics for sig, res in bt_results_map.items()}
                     ).T.sort_values("sharpe", ascending=False)
                     self._save_backtest(comparison, symbol)
-                    backtest_results[symbol]    = bt_results_map
-                    daily_returns_all[symbol]   = {
+                    backtest_results[symbol] = bt_results_map
+                    daily_returns_all[symbol] = {
                         sig: res.daily_returns for sig, res in bt_results_map.items()
                     }
 
@@ -349,11 +353,11 @@ class MarketDataPipeline:
 
     def _run_factor_attribution(
         self,
-        daily_returns_all:  Dict[str, Dict[str, pd.Series]],
-        start_date:         str,
-        end_date:           str,
-        processed:          Dict[str, pd.DataFrame],
-        backtest_results:   Dict[str, Dict],
+        daily_returns_all: Dict[str, Dict[str, pd.Series]],
+        start_date: str,
+        end_date: str,
+        processed: Dict[str, pd.DataFrame],
+        backtest_results: Dict[str, Dict],
     ) -> None:
         """
         Run factor attribution and regime analysis for every symbol.
@@ -434,10 +438,10 @@ class MarketDataPipeline:
 
     def _save_reports(
         self,
-        df_clean:   pd.DataFrame,
-        df_feat:    pd.DataFrame,
+        df_clean: pd.DataFrame,
+        df_feat: pd.DataFrame,
         df_signals: pd.DataFrame,
-        symbol:     str,
+        symbol: str,
     ) -> None:
         # Data quality
         clean_report = self.cleaner.quality_report(df_clean, ticker=symbol)
@@ -494,21 +498,7 @@ class MarketDataPipeline:
 
     @staticmethod
     def _factor_results_to_json(results) -> dict:
-        """
-        Serialise FactorModelResults to a plain JSON-safe dict.
-
-        Structure:
-            {
-              "ticker": str,
-              "regressions": {
-                signal_col: [
-                  { model, alpha_annual, t_stat, p_value, significant,
-                    r2, adj_r2, ic, ir, n_obs, betas: {...} }
-                ]
-              },
-              "attribution_table": { ... }   (dict of dicts)
-            }
-        """
+        """Serialise FactorModelResults to a plain JSON-safe dict."""
         out: dict = {"ticker": results.ticker, "regressions": {}}
 
         for sig, regs in results.regressions.items():
@@ -557,12 +547,11 @@ if __name__ == "__main__":
 
     pipeline = MarketDataPipeline(args.config)
 
-    # Allow CLI override of factor flag
     if args.no_factor:
         pipeline.config["factor"]["enabled"] = False
 
     results = pipeline.run(
-        symbols=args.symbols or None,
+        symbols=args.symbols if args.symbols else None,
         start_date=args.start,
         end_date=args.end,
     )
@@ -582,7 +571,6 @@ if __name__ == "__main__":
         ]
         sig_cols = [c for c in df.columns if c.startswith("signal_")]
 
-        # Pull ensemble Sharpe from saved backtest CSV
         sharpe_str = ""
         bt_path = pipeline._data_dir / "results" / f"{ticker}_backtest.csv"
         if bt_path.exists():
@@ -594,7 +582,6 @@ if __name__ == "__main__":
             except Exception:
                 pass
 
-        # Pull ensemble alpha from factor report
         alpha_str = ""
         f_path = pipeline._data_dir / "results" / f"{ticker}_factor_report.json"
         if f_path.exists():

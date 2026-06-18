@@ -1,702 +1,737 @@
 """
-regime_detector.py — Phase 6.b: Probabilistic Regime Detection
+regime_detector.py — Phase 7: Regime Detection & Adaptive Signal Switching
 QuantOS Market Data Pipeline
 
 Pipeline position:
-    fetch → clean → features → signals → [regime detection] → regime filter → backtest
+    fetch → clean → features → signals → regime filter → [regime detection]
+            → backtest → factor model
 
-Two detectors, same interface:
+This module goes beyond the binary vol-percentile gate in regime_filter.py.
+Two detectors, same interface, swappable:
 
-    RuleBasedRegimeClassifier
-        Fast, deterministic, no fitting required. Combines vol percentile,
-        rolling return direction, and MACD sign into a discrete label.
-        This is what RegimeFilteredEnsemble (Phase 6) used implicitly.
+    RuleBasedClassifier
+        Deterministic multi-indicator classification:
+            vol percentile + rolling return sign + MACD sign → regime label
+        Fast, interpretable, no fitting required. Improves on the single-
+        variable gate in Phase 6 by combining 3 independent signals.
 
     HMMRegimeDetector
-        Statistical model. Learns K hidden states from historical data via
-        Gaussian HMM (Baum-Welch / EM algorithm). Produces a PROBABILITY of
-        being in each regime at every bar, not just a binary label.
+        Gaussian Hidden Markov Model over [return, volatility, macd_line].
+        Learns K latent states from data via Baum-Welch (EM algorithm).
+        Produces a PROBABILITY of being in each regime at every bar, not
+        just a label — P(trending)=0.73 carries more information than
+        trending=True, and lets position size scale continuously with
+        confidence rather than snapping on/off.
 
-        P(trending) = 0.73 is more useful than trending=True — it lets you
-        scale position size continuously rather than snap on/off.
+        Transition matrix A[i,j] = P(state_t=j | state_{t-1}=i) is learned,
+        not assumed — it tells you empirically how persistent each regime
+        is, which signal family should dominate, and how fast to react to
+        a suspected regime change.
 
-Both detectors expose:
-    .fit(df)                          — learn parameters (HMM only; rule-based is no-op)
-    .predict(df)   → regime_label Series
-    .predict_proba(df) → DataFrame of per-regime probabilities
+    AdaptiveSignalSwitch
+        Combines individual signals weighted by regime probability:
+            signal_adaptive = P(range_bound)*signal_rsi
+                             + P(trending)   *signal_macd
+                             + P(crisis)     *0
+        Continuous version of the Phase 6 binary ensemble. No discontinuity
+        at regime boundaries — the position scales smoothly as confidence
+        shifts from one regime to another.
 
-AdaptiveSignalSwitch:
-    Combines multiple signals using regime PROBABILITIES as continuous weights:
-        effective_signal = Sum_k  P(regime=k) * signal_for_regime_k
+Mathematical core (HMM):
+    Emission:   P(x_t | state=k) = N(x_t | mu_k, Sigma_k)
+    Transition: P(state_t=j | state_{t-1}=i) = A[i,j]
+    Fitting:    Baum-Welch (EM) maximises P(x_1:T | theta) over (mu, Sigma, A)
+    Inference:  Forward algorithm gives P(state_t=k | x_1:t)  [filtered, online]
+                Viterbi gives the single most likely state path [smoothed, offline]
 
-    This generalises the Phase 6 binary gate into a continuous, confidence-
-    weighted ensemble. In a transition period (P(trending)=0.5, P(range)=0.5),
-    the signal blends rather than flipping abruptly — reducing whipsaw risk
-    at regime boundaries.
-
-Mathematical core (Gaussian HMM, K states):
-    Emission:    P(x_t | state=k) = N(x_t | mu_k, Sigma_k)
-    Transition:  A[i,j] = P(state_t=j | state_{t-1}=i)
-    Inference:   Forward algorithm -> P(state_t=k | x_{1:t})   [filtered probability]
-                 Viterbi algorithm -> most likely state sequence (smoothed)
+    This module uses the FORWARD algorithm conceptually (via expanding-window
+    predict_proba calls), which is the online/real-time-appropriate choice:
+    P(state_t | x_1:t) uses only data up to t, with no lookahead. The
+    smoothed predict_proba() on the full series uses future observations
+    and is exposed separately, explicitly labelled as analysis-only.
 
 Usage:
     # Rule-based (fast baseline)
-    clf = RuleBasedRegimeClassifier()
-    df["regime_label"] = clf.predict(df)
+    clf = RuleBasedClassifier()
+    result = clf.classify(df)
+    df["regime_label"] = result.labels
 
-    # HMM (probabilistic, learns from data)
-    hmm = HMMRegimeDetector(n_states=3)
-    hmm.fit(df)
-    probs = hmm.predict_proba(df)        # columns: trending_up, range_bound, ...
-    labels = hmm.predict(df)             # most likely regime per bar
+    # HMM (probabilistic, fitted)
+    hmm = HMMRegimeDetector(n_states=4)
+    hmm.fit(df, train_end="2022-01-01")          # fit on in-sample data only
+    result = hmm.predict(df, online=True)         # P(state) per bar, no lookahead
 
-    # Adaptive switching
+    # Adaptive switch
     switch = AdaptiveSignalSwitch()
-    switch.register("trending_up",   "signal_macd")
-    switch.register("range_bound",   "signal_rsi")
-    switch.register("crisis",        None)   # flat in crisis
-    df["signal_adaptive"] = switch.apply(df, probs)
+    switch.register("signal_rsi",  favourable=["range_bound"])
+    switch.register("signal_macd", favourable=["trending_up", "trending_down"])
+    df["signal_adaptive"] = switch.apply(df, result.probabilities)
 """
 
 import numpy as np
 import pandas as pd
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Literal
+from dataclasses import dataclass, field
+from typing import Dict, List, Literal, Optional, Tuple
 import logging
 
 logger = logging.getLogger(__name__)
 
 
 # ======================================================================
-# Data structures
+# Shared regime vocabulary
 # ======================================================================
+
+REGIME_NAMES = ["range_bound", "trending_up", "trending_down", "crisis"]
+
 
 @dataclass
 class RegimeDetectionResult:
     """
-    Output of any regime detector.
+    Output of any regime detector — common interface for both
+    RuleBasedClassifier and HMMRegimeDetector.
 
-    labels:        Most likely regime per bar (string)
+    labels:        Most likely regime per bar (argmax of probs, or rule output)
     probabilities: DataFrame, one column per regime, rows sum to 1.0
-    model_name:    "rule_based" | "hmm"
-    n_regimes:     Number of distinct regimes
-    transition_matrix: For HMM only — P(state_j | state_i). None for rule-based.
-    regime_stats:  Per-regime descriptive stats (mean return, vol, frequency)
+                   (rule-based: one-hot; HMM: continuous probabilities)
+    transition_matrix: K x K matrix, only populated for HMM. None for rule-based.
+    method:        "rule_based" | "hmm"
     """
     labels:             pd.Series
-    probabilities:       pd.DataFrame
-    model_name:          str
-    n_regimes:           int
-    transition_matrix:   Optional[pd.DataFrame] = None
-    regime_stats:         Optional[pd.DataFrame] = None
+    probabilities:      pd.DataFrame
+    transition_matrix:  Optional[pd.DataFrame] = None
+    method:              str = ""
+    state_names:         List[str] = field(default_factory=list)
 
-    def summary(self) -> str:
-        freq = self.labels.value_counts(normalize=True).round(3)
-        lines = [f"Regime detection ({self.model_name}, {self.n_regimes} states):"]
-        for label, pct in freq.items():
-            lines.append(f"  {label:<15s} {pct:.1%}")
-        return "\n".join(lines)
+    def regime_durations(self) -> pd.Series:
+        """
+        Average number of consecutive bars spent in each regime.
+        Short durations → choppy/noisy classification. Long durations →
+        persistent, tradeable regimes.
+        """
+        labels = self.labels.dropna()
+        if len(labels) == 0:
+            return pd.Series(dtype=float)
+
+        change = labels != labels.shift(1)
+        block_id = change.cumsum()
+        block_sizes = labels.groupby(block_id).size()
+        block_labels = labels.groupby(block_id).first()
+
+        return block_sizes.groupby(block_labels).mean()
+
+    def regime_frequency(self) -> pd.Series:
+        """Fraction of bars spent in each regime."""
+        return self.labels.value_counts(normalize=True)
 
 
 # ======================================================================
-# Rule-Based Classifier
+# Rule-based classifier
 # ======================================================================
 
-class RuleBasedRegimeClassifier:
+class RuleBasedClassifier:
     """
-    Fast, deterministic regime classification from indicator thresholds.
+    Deterministic multi-indicator regime classifier.
 
-    Combines three signals into a discrete regime label:
-        1. Volatility percentile (vol_21d vs trailing history)
-        2. Rolling return direction (63d momentum)
-        3. MACD line sign (trend confirmation)
+    Combines three independent signals into a single regime label:
+        1. Volatility percentile  (calm vs turbulent)
+        2. Rolling return sign    (up vs down vs flat)
+        3. MACD line sign         (confirms trend direction)
 
-    Decision logic (in priority order):
-        vol > crisis_percentile                       → "crisis"
-        |rolling_return| > trend_threshold AND
-            macd agrees with direction                 → "trending_up" / "trending_down"
-        otherwise                                       → "range_bound"
+    Decision logic (evaluated in order — first match wins):
+        vol_pct > crisis_threshold                        → "crisis"
+        |rolling_return| < flat_threshold                  → "range_bound"
+        rolling_return > 0  AND macd_line > 0               → "trending_up"
+        rolling_return < 0  AND macd_line < 0               → "trending_down"
+        otherwise (return and MACD disagree)                → "range_bound"
+                                                                (conflicting signals
+                                                                 = no clear trend)
 
-    No fitting required — this is a fixed-rule baseline.
-    Use this when you need something working immediately, or as a sanity
-    check against the HMM's learned regimes.
+    This requires no fitting and runs instantly. Use as a baseline before
+    comparing against the HMM, and as a fallback when there isn't enough
+    history to fit an HMM reliably (HMM needs ~252+ bars to be stable).
 
     Args:
-        vol_col:           Volatility column (e.g. "vol_21d")
-        return_col:        Daily returns column
-        macd_col:          MACD line column
-        crisis_percentile: vol above this percentile (trailing 252d) = crisis
-        trend_window:      Window for rolling return (default 63 = ~3mo)
-        trend_threshold:   Annualised return magnitude defining a "trend"
-        lookback:          Trailing window for vol percentile calculation
+        vol_col:          Volatility column (e.g. "vol_21d")
+        return_col:       Daily returns column
+        macd_col:         MACD line column
+        vol_lookback:      Window for volatility percentile ranking
+        crisis_percentile: Vol percentile above which regime = "crisis"
+        trend_window:      Window for rolling return (trend direction)
+        flat_threshold:    |rolling return| below this (annualised) = flat/range-bound
     """
-
-    REGIMES = ["trending_up", "trending_down", "range_bound", "crisis"]
 
     def __init__(
         self,
         vol_col:           str   = "vol_21d",
         return_col:        str   = "returns",
         macd_col:           str   = "macd_line",
-        crisis_percentile: float = 90.0,
+        vol_lookback:       int   = 252,
+        crisis_percentile:  float = 90.0,
         trend_window:       int   = 63,
-        trend_threshold:    float = 0.10,
-        lookback:           int   = 252,
+        flat_threshold:     float = 0.05,
     ):
         self.vol_col           = vol_col
         self.return_col        = return_col
-        self.macd_col          = macd_col
-        self.crisis_percentile = crisis_percentile
-        self.trend_window      = trend_window
-        self.trend_threshold   = trend_threshold
-        self.lookback          = lookback
+        self.macd_col           = macd_col
+        self.vol_lookback       = vol_lookback
+        self.crisis_percentile  = crisis_percentile
+        self.trend_window       = trend_window
+        self.flat_threshold     = flat_threshold
 
-    def fit(self, df: pd.DataFrame) -> "RuleBasedRegimeClassifier":
-        """No-op — rule-based classifier requires no fitting."""
-        return self
-
-    def predict(self, df: pd.DataFrame) -> pd.Series:
-        """Return the most likely regime label per bar."""
-        return self._classify(df)
-
-    def predict_proba(self, df: pd.DataFrame) -> pd.DataFrame:
+    def classify(self, df: pd.DataFrame) -> RegimeDetectionResult:
         """
-        Return one-hot probabilities (1.0 for the assigned regime, 0.0 else).
+        Classify every bar into one of REGIME_NAMES.
 
-        Rule-based classification is deterministic, so probabilities are
-        degenerate (always 0 or 1). Provided for interface compatibility
-        with HMMRegimeDetector.
+        Returns:
+            RegimeDetectionResult with one-hot probabilities (label is
+            certain — rule-based has no uncertainty quantification).
         """
-        labels = self._classify(df)
-        proba = pd.DataFrame(0.0, index=df.index, columns=self.REGIMES)
-        for regime in self.REGIMES:
-            proba.loc[labels == regime, regime] = 1.0
-        return proba
+        self._require_columns(df)
 
-    def detect(self, df: pd.DataFrame) -> RegimeDetectionResult:
-        """Full detection result with stats."""
-        labels = self._classify(df)
-        proba  = self.predict_proba(df)
-        stats  = self._regime_stats(df, labels)
-        return RegimeDetectionResult(
-            labels=labels,
-            probabilities=proba,
-            model_name="rule_based",
-            n_regimes=len(self.REGIMES),
-            transition_matrix=None,
-            regime_stats=stats,
+        vol = df[self.vol_col]
+        ret = df[self.return_col]
+        macd = df[self.macd_col]
+
+        # ---- Volatility percentile (rolling, point-in-time) ----
+        vol_pct = vol.rolling(
+            self.vol_lookback, min_periods=self.vol_lookback // 4
+        ).rank(pct=True) * 100
+
+        # ---- Rolling trend direction ----
+        rolling_ret_annual = (
+            ret.rolling(self.trend_window, min_periods=self.trend_window // 2).mean()
+            * 252
         )
 
-    def _classify(self, df: pd.DataFrame) -> pd.Series:
-        self._check_columns(df)
-
-        vol    = df[self.vol_col]
-        ret    = df[self.return_col]
-        macd   = df[self.macd_col]
-
-        # 1. Crisis: vol above the Nth percentile of trailing history
-        vol_threshold = vol.rolling(
-            self.lookback, min_periods=self.lookback // 4
-        ).quantile(self.crisis_percentile / 100)
-        is_crisis = (vol > vol_threshold).fillna(False)
-
-        # 2. Trend: rolling annualised return beyond threshold
-        rolling_ret_annual = ret.rolling(
-            self.trend_window, min_periods=self.trend_window // 2
-        ).mean() * 252
-
-        is_trending_up   = (rolling_ret_annual >  self.trend_threshold) & (macd > 0)
-        is_trending_down = (rolling_ret_annual < -self.trend_threshold) & (macd < 0)
-
-        # ---- Assign labels with priority: crisis > trend > range_bound ----
+        # ---- Decision logic ----
         labels = pd.Series("range_bound", index=df.index)
-        labels[is_trending_up]   = "trending_up"
-        labels[is_trending_down] = "trending_down"
-        labels[is_crisis]        = "crisis"   # crisis overrides trend
 
-        return labels
+        is_crisis    = vol_pct > self.crisis_percentile
+        is_flat      = rolling_ret_annual.abs() < self.flat_threshold
+        is_up        = (rolling_ret_annual > 0) & (macd > 0)
+        is_down      = (rolling_ret_annual < 0) & (macd < 0)
 
-    def _regime_stats(self, df: pd.DataFrame, labels: pd.Series) -> pd.DataFrame:
-        """Descriptive statistics per regime: mean return, vol, frequency."""
-        rows = []
-        for regime in self.REGIMES:
-            mask = labels == regime
-            if mask.sum() < 2:
-                rows.append({
-                    "regime": regime, "frequency": 0.0,
-                    "mean_return_annual": np.nan, "vol_annual": np.nan,
-                    "sharpe": np.nan, "n_bars": int(mask.sum()),
-                })
-                continue
-            r = df.loc[mask, self.return_col].dropna()
-            mean_ann = float(r.mean() * 252)
-            vol_ann  = float(r.std() * np.sqrt(252))
-            sharpe   = float(mean_ann / vol_ann) if vol_ann > 0 else 0.0
-            rows.append({
-                "regime": regime,
-                "frequency": round(float(mask.mean()), 4),
-                "mean_return_annual": round(mean_ann, 4),
-                "vol_annual": round(vol_ann, 4),
-                "sharpe": round(sharpe, 4),
-                "n_bars": int(mask.sum()),
-            })
-        return pd.DataFrame(rows).set_index("regime")
+        # Apply in priority order: crisis overrides everything
+        labels[is_up & ~is_crisis]                  = "trending_up"
+        labels[is_down & ~is_crisis]                 = "trending_down"
+        labels[is_flat & ~is_crisis]                  = "range_bound"
+        labels[is_crisis]                              = "crisis"
+        # Where return/MACD disagree and not flat/crisis → leave as range_bound default
 
-    def _check_columns(self, df: pd.DataFrame) -> None:
-        missing = [c for c in [self.vol_col, self.return_col, self.macd_col]
-                   if c not in df.columns]
+        # Warmup period: insufficient data for any classification
+        warmup = vol_pct.isna() | rolling_ret_annual.isna()
+        labels[warmup] = np.nan
+
+        # ---- One-hot probabilities (rule-based = certain, no uncertainty) ----
+        probs = pd.DataFrame(0.0, index=df.index, columns=REGIME_NAMES)
+        for regime in REGIME_NAMES:
+            probs.loc[labels == regime, regime] = 1.0
+        probs.loc[warmup, :] = np.nan
+
+        logger.info(
+            f"RuleBasedClassifier: "
+            f"{labels.value_counts(normalize=True).round(3).to_dict()}"
+        )
+
+        return RegimeDetectionResult(
+            labels=labels,
+            probabilities=probs,
+            transition_matrix=None,
+            method="rule_based",
+            state_names=REGIME_NAMES,
+        )
+
+    def _require_columns(self, df: pd.DataFrame) -> None:
+        missing = [
+            c for c in [self.vol_col, self.return_col, self.macd_col]
+            if c not in df.columns
+        ]
         if missing:
             raise KeyError(
-                f"RuleBasedRegimeClassifier requires columns {missing}. "
+                f"RuleBasedClassifier requires columns {missing}. "
                 f"Available: {list(df.columns)}"
             )
 
 
 # ======================================================================
-# HMM Regime Detector
+# HMM regime detector
 # ======================================================================
 
 class HMMRegimeDetector:
     """
     Gaussian Hidden Markov Model for probabilistic regime detection.
 
-    Learns K hidden market states from a multivariate observation vector
-    (typically returns and volatility). Unlike the rule-based classifier,
-    this:
-        - Learns regime parameters (mean, covariance) directly from data
-        - Learns transition probabilities between regimes
-        - Produces continuous probabilities, not just hard labels
+    Models the market as transitioning between K hidden states, each with
+    its own Gaussian distribution over observed features (return, vol,
+    MACD). Learns both the state-specific distributions and the
+    transition matrix from historical data via Baum-Welch (EM).
 
-    The model does NOT know in advance which state is "trending" vs
-    "range_bound" — states are unlabelled until you inspect their
-    learned mean return and volatility and assign semantic labels.
+    Critical design choice — online vs smoothed probabilities:
+        predict_proba() computes the smoothed posterior using the full
+        sequence (forward-backward algorithm) — this technically uses
+        future observations relative to any given bar t. It is exposed
+        for post-hoc analysis and visualisation only.
 
-    Mathematical model:
-        Emission:    x_t | state=k  ~  N(mu_k, Sigma_k)
-        Transition:  P(state_t=j | state_{t-1}=i) = A[i,j]
-        Estimation:  Baum-Welch (EM algorithm) via hmmlearn
+        predict_proba_online() instead re-applies the model on an
+        EXPANDING window ending at t, so the probability assigned to bar t
+        uses only x_1:t. This is the lookahead-free version and is the one
+        that must be used when generating signals for backtesting.
+
+    State labelling:
+        HMM states are unordered by default (state 0, 1, 2 have no inherent
+        meaning). After fitting, this class automatically labels each state
+        by its empirical mean return and volatility:
+            highest mean return, low-moderate vol  → "trending_up"
+            lowest mean return  (most negative)     → "trending_down"
+            lowest volatility                        → "range_bound"
+            highest volatility                       → "crisis"
+        This re-labelling is necessary because hmmlearn returns arbitrary
+        state indices, not semantic labels.
 
     Args:
-        n_states:     Number of hidden regimes to learn (typically 2-4)
-        feature_cols: Observation columns used to fit the HMM
-                      Default: returns + vol_21d (captures direction + magnitude)
-        n_iter:       Max EM iterations for Baum-Welch
-        random_state: Seed for reproducibility (EM has local optima)
-        covariance_type: "diag" (independent features) or "full" (correlated)
+        n_states:       Number of hidden states (regimes) to fit.
+                        4 maps to REGIME_NAMES; other values get generic
+                        "state_0", "state_1", ... labels.
+        feature_cols:   Columns used as the HMM observation vector.
+        n_iter:         Max EM iterations for Baum-Welch.
+        random_state:   Seed for reproducible fitting (EM is sensitive to init).
+        covariance_type: "diag" (faster, assumes independent features) or
+                        "full" (captures feature correlations, slower).
     """
 
     def __init__(
         self,
-        n_states:         int = 3,
-        feature_cols:      Optional[List[str]] = None,
-        n_iter:            int = 200,
-        random_state:      int = 42,
-        covariance_type:   Literal["diag", "full", "spherical"] = "diag",
+        n_states:        int  = 4,
+        feature_cols:     List[str] = ("returns", "vol_21d", "macd_line"),
+        n_iter:           int  = 100,
+        random_state:     int  = 42,
+        covariance_type:  Literal["diag", "full"] = "diag",
     ):
         self.n_states        = n_states
-        self.feature_cols    = feature_cols or ["returns", "vol_21d"]
-        self.n_iter          = n_iter
-        self.random_state    = random_state
-        self.covariance_type = covariance_type
+        self.feature_cols     = list(feature_cols)
+        self.n_iter           = n_iter
+        self.random_state     = random_state
+        self.covariance_type  = covariance_type
 
-        self._model        = None
-        self._scaler_mean   = None
-        self._scaler_std    = None
-        self._state_labels  = None   # learned mapping: state_idx -> semantic label
-        self._fitted        = False
+        self._model         = None
+        self._scaler_mean    = None
+        self._scaler_std     = None
+        self._state_labels   = None   # maps hmm state index → semantic name
+        self._is_fitted      = False
 
-    def fit(self, df: pd.DataFrame) -> "HMMRegimeDetector":
+    # ------------------------------------------------------------------ #
+    # Fitting                                                              #
+    # ------------------------------------------------------------------ #
+
+    def fit(
+        self,
+        df:        pd.DataFrame,
+        train_end: Optional[str] = None,
+    ) -> "HMMRegimeDetector":
         """
-        Fit the Gaussian HMM on historical data.
+        Fit the HMM on historical data.
 
-        Standardises features (zero mean, unit variance) before fitting —
-        HMM emission covariances are sensitive to feature scale, and
-        returns (~1%) vs volatility (~15% annualised) live on very
-        different scales without standardisation.
+        Args:
+            df:        Feature-enriched DataFrame
+            train_end: ISO date string. If provided, fits only on data up
+                       to this date (out-of-sample discipline). If None,
+                       fits on the entire df (use only for exploratory work,
+                       not for backtesting — this would be lookahead bias).
+
+        Returns:
+            self (fitted)
         """
-        try:
-            from hmmlearn import hmm
-        except ImportError as exc:
-            raise ImportError(
-                "HMMRegimeDetector requires hmmlearn: pip install hmmlearn"
-            ) from exc
+        from hmmlearn.hmm import GaussianHMM
 
-        X, valid_idx = self._prepare_features(df)
-        if len(X) < 30:
+        self._require_columns(df)
+
+        train_df = df if train_end is None else df.loc[:train_end]
+        X = train_df[self.feature_cols].dropna()
+
+        if len(X) < self.n_states * 30:
             raise ValueError(
-                f"Insufficient data to fit HMM: {len(X)} valid rows "
-                f"(need at least 30)."
+                f"Insufficient data to fit HMM: {len(X)} rows for "
+                f"{self.n_states} states (need ≥{self.n_states * 30})."
             )
 
-        # Standardise
-        self._scaler_mean = X.mean(axis=0)
-        self._scaler_std  = X.std(axis=0)
-        self._scaler_std[self._scaler_std == 0] = 1.0  # avoid div-by-zero
+        # Standardise features — HMM Gaussian emissions are scale-sensitive
+        self._scaler_mean = X.mean()
+        self._scaler_std  = X.std().replace(0, 1.0)
         X_scaled = (X - self._scaler_mean) / self._scaler_std
 
-        model = hmm.GaussianHMM(
+        model = GaussianHMM(
             n_components=self.n_states,
             covariance_type=self.covariance_type,
             n_iter=self.n_iter,
             random_state=self.random_state,
         )
-        model.fit(X_scaled)
-        self._model = model
+        model.fit(X_scaled.values)
 
-        # Assign semantic labels based on learned state characteristics
-        self._state_labels = self._infer_semantic_labels(X_scaled, model)
-        self._fitted = True
+        self._model = model
+        self._state_labels = self._label_states(model, X_scaled)
+        self._is_fitted = True
 
         logger.info(
-            f"HMM fitted: {self.n_states} states, "
-            f"{len(X)} observations, "
+            f"HMM fitted on {len(X)} obs, {self.n_states} states, "
+            f"log-likelihood={model.score(X_scaled.values):.1f}, "
             f"converged={model.monitor_.converged}"
         )
-        logger.info(f"State -> regime mapping: {self._state_labels}")
+        logger.info(f"State labels: {self._state_labels}")
 
         return self
 
-    def predict(self, df: pd.DataFrame) -> pd.Series:
+    def _label_states(
+        self, model, X_scaled: pd.DataFrame
+    ) -> Dict[int, str]:
         """
-        Return the most likely regime label per bar (Viterbi decoding).
-
-        Uses the full sequence to find the globally most likely state path —
-        this is "smoothed" in the sense that it considers the entire fitted
-        window. For strict point-in-time inference use predict_proba()
-        with method="filter".
+        Map arbitrary HMM state indices to semantic regime names based on
+        each state's empirical mean return and volatility (un-scaled).
         """
-        self._check_fitted()
-        X, valid_idx = self._prepare_features(df)
-        X_scaled = (X - self._scaler_mean) / self._scaler_std
+        # Decode most likely state per training observation
+        states = model.predict(X_scaled.values)
 
-        state_seq = self._model.predict(X_scaled)
-        labels = pd.Series("unknown", index=df.index)
-        semantic = [self._state_labels[s] for s in state_seq]
-        labels.loc[valid_idx] = semantic
-
-        return labels
-
-    def predict_proba(
-        self,
-        df: pd.DataFrame,
-        method: Literal["filter", "smooth"] = "filter",
-    ) -> pd.DataFrame:
-        """
-        Return per-regime probability at each bar.
-
-        Args:
-            method: "filter" — forward algorithm, P(state_t | x_{1:t}).
-                              Point-in-time, no lookahead. USE THIS for backtesting.
-                    "smooth" — forward-backward, P(state_t | x_{1:T}).
-                              Uses future data too — for diagnostics only,
-                              NEVER for trading signals (lookahead bias).
-
-        Returns:
-            DataFrame with one column per semantic regime label, rows sum to 1.0.
-        """
-        self._check_fitted()
-        X, valid_idx = self._prepare_features(df)
-        X_scaled = (X - self._scaler_mean) / self._scaler_std
-
-        if method == "filter":
-            state_probs = self._forward_only(X_scaled)
-        else:
-            _, state_probs = self._model.score_samples(X_scaled)
-
-        unique_labels = sorted(set(self._state_labels.values()))
-        proba = pd.DataFrame(
-            0.0, index=df.index, columns=unique_labels,
+        ret_idx = self.feature_cols.index("returns") if "returns" in self.feature_cols else 0
+        vol_idx = self.feature_cols.index("vol_21d") if "vol_21d" in self.feature_cols else (
+            1 if len(self.feature_cols) > 1 else 0
         )
 
-        # Aggregate raw state probabilities into semantic labels
-        # (multiple HMM states might map to the same semantic regime)
-        agg = np.zeros((len(X_scaled), len(unique_labels)))
-        label_to_col = {label: i for i, label in enumerate(unique_labels)}
-        for state_idx, label in self._state_labels.items():
-            agg[:, label_to_col[label]] += state_probs[:, state_idx]
+        # Compute per-state mean return and mean vol (in original units)
+        ret_col = X_scaled.iloc[:, ret_idx] * self._scaler_std.iloc[ret_idx] + self._scaler_mean.iloc[ret_idx]
+        vol_col = X_scaled.iloc[:, vol_idx] * self._scaler_std.iloc[vol_idx] + self._scaler_mean.iloc[vol_idx]
 
-        proba.loc[valid_idx, :] = agg
+        state_stats = {}
+        for s in range(self.n_states):
+            mask = states == s
+            if mask.sum() == 0:
+                state_stats[s] = {"mean_ret": 0.0, "mean_vol": 0.0}
+                continue
+            state_stats[s] = {
+                "mean_ret": float(ret_col[mask].mean()),
+                "mean_vol": float(vol_col[mask].mean()),
+            }
 
-        return proba
+        if self.n_states == 4:
+            # Standard 4-regime labelling
+            by_vol = sorted(state_stats.items(), key=lambda kv: kv[1]["mean_vol"])
+            crisis_state = by_vol[-1][0]            # highest vol
+            remaining = [s for s, _ in by_vol if s != crisis_state]
 
-    def detect(self, df: pd.DataFrame) -> RegimeDetectionResult:
-        """Full detection result including transition matrix and stats."""
+            by_ret = sorted(
+                [(s, state_stats[s]) for s in remaining],
+                key=lambda kv: kv[1]["mean_ret"],
+            )
+            down_state  = by_ret[0][0]               # most negative return
+            up_state    = by_ret[-1][0]               # most positive return
+            range_state = [s for s, _ in by_ret if s not in (down_state, up_state)]
+            range_state = range_state[0] if range_state else by_ret[len(by_ret)//2][0]
+
+            labels = {
+                crisis_state: "crisis",
+                up_state:     "trending_up",
+                down_state:   "trending_down",
+                range_state:  "range_bound",
+            }
+            # Ensure all states got a label even with ties
+            for s in range(self.n_states):
+                labels.setdefault(s, f"state_{s}")
+            return labels
+        else:
+            # Generic labelling for non-4 state counts
+            by_vol = sorted(state_stats.items(), key=lambda kv: kv[1]["mean_vol"])
+            return {s: f"state_{i}_vol_rank" for i, (s, _) in enumerate(by_vol)}
+
+    # ------------------------------------------------------------------ #
+    # Prediction                                                          #
+    # ------------------------------------------------------------------ #
+
+    def predict_proba_online(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Filtered state probabilities: P(state_t | x_1:t).
+
+        Uses ONLY past and current observations — no lookahead. This is
+        the correct method to use when generating signals for backtesting.
+
+        Implementation: re-applies the forward-backward pass on an
+        expanding window ending at each bar t; only the LAST row of each
+        window's output is kept, since that row reflects P(state_t | x_1:t)
+        given the window contains only x_1:t. This is O(n^2) and slow for
+        very long series; for production use, replace with an incremental
+        forward-pass implementation.
+
+        For typical backtest lengths (a few thousand bars), this is fast
+        enough — the per-step cost is the HMM forward pass cost, not refitting.
+
+        Returns:
+            DataFrame with one column per regime name, rows sum to ~1.0,
+            NaN during warmup (insufficient history for first window).
+        """
         self._check_fitted()
-        labels = self.predict(df)
-        proba  = self.predict_proba(df)
+        X = self._prepare_features(df)
+
+        min_window = max(30, self.n_states * 10)
+        unique_names = list(dict.fromkeys(self._state_labels.values()))
+        probs = pd.DataFrame(
+            np.nan, index=df.index, columns=unique_names
+        )
+
+        # Use hmmlearn's built-in forward-backward pass via predict_proba on
+        # expanding windows — the LAST row of each window's output reflects
+        # P(state_t | x_1:t), since the window itself only contains x_1:t.
+        valid_idx = X.dropna().index
+
+        for end_pos in range(min_window, len(valid_idx) + 1):
+            window_idx = valid_idx[:end_pos]
+            X_window = X.loc[window_idx].values
+
+            try:
+                state_probs = self._model.predict_proba(X_window)
+                last_idx = window_idx[-1]
+                last_probs = state_probs[-1]
+                # Accumulate into the named column (sum probabilities of
+                # any hmm states that share the same semantic label)
+                row = {name: 0.0 for name in unique_names}
+                for state_num, name in self._state_labels.items():
+                    row[name] += float(last_probs[state_num])
+                for name in unique_names:
+                    probs.loc[last_idx, name] = row[name]
+            except Exception as exc:
+                logger.debug(f"HMM predict_proba failed at step {end_pos}: {exc}")
+                continue
+
+        return probs
+
+    def predict_proba(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Smoothed state probabilities: P(state_t | x_1:T), using the FULL
+        sequence (forward-backward algorithm).
+
+        WARNING: this uses future observations relative to t. Suitable for
+        post-hoc regime analysis and visualisation, NOT for backtesting —
+        using this to generate trading signals introduces lookahead bias.
+        Use predict_proba_online() for any signal generation feeding a
+        backtest.
+
+        Returns:
+            DataFrame with one column per regime name, rows sum to 1.0.
+        """
+        self._check_fitted()
+        X = self._prepare_features(df)
+        valid = X.dropna()
+
+        state_probs = self._model.predict_proba(valid.values)
+
+        # Use a list (not set) to preserve deterministic column order;
+        # multiple HMM states can share a semantic name (e.g. two states
+        # both labelled "range_bound" in a degenerate fit), so we sum
+        # their probabilities into the same named column.
+        unique_names = list(dict.fromkeys(self._state_labels.values()))
+        probs = pd.DataFrame(0.0, index=df.index, columns=unique_names)
+        for state_num, name in self._state_labels.items():
+            probs.loc[valid.index, name] = (
+                probs.loc[valid.index, name] + state_probs[:, state_num]
+            )
+
+        probs.loc[X.isna().any(axis=1), :] = np.nan
+        return probs
+
+    def predict(self, df: pd.DataFrame, online: bool = True) -> RegimeDetectionResult:
+        """
+        Full regime detection result: labels + probabilities + transition matrix.
+
+        Args:
+            online: If True, uses predict_proba_online() (lookahead-free,
+                   correct for backtesting). If False, uses the smoothed
+                   predict_proba() (for analysis/visualisation only).
+        """
+        probs = self.predict_proba_online(df) if online else self.predict_proba(df)
+
+        all_nan_rows = probs.isna().all(axis=1)
+        # idxmax cannot handle all-NaN rows; temporarily fill with 0 to get
+        # a placeholder argmax, then mask those rows back to NaN afterward.
+        labels = probs.fillna(0.0).idxmax(axis=1)
+        labels = labels.astype(object)
+        labels[all_nan_rows] = np.nan
 
         trans_df = pd.DataFrame(
             self._model.transmat_,
-            index=[f"state_{i}({self._state_labels[i]})" for i in range(self.n_states)],
-            columns=[f"state_{i}({self._state_labels[i]})" for i in range(self.n_states)],
+            index=[self._state_labels[i] for i in range(self.n_states)],
+            columns=[self._state_labels[i] for i in range(self.n_states)],
         )
-
-        stats = self._compute_regime_stats(df, labels)
+        # Collapse duplicate rows/cols if multiple states share a name
+        trans_df = trans_df.groupby(trans_df.index).mean()
+        trans_df = trans_df.T.groupby(trans_df.columns).mean().T
 
         return RegimeDetectionResult(
             labels=labels,
-            probabilities=proba,
-            model_name="hmm",
-            n_regimes=len(set(self._state_labels.values())),
-            transition_matrix=trans_df.round(4),
-            regime_stats=stats,
+            probabilities=probs,
+            transition_matrix=trans_df,
+            method="hmm",
+            state_names=list(probs.columns),
         )
 
     # ------------------------------------------------------------------ #
     # Internal helpers                                                     #
     # ------------------------------------------------------------------ #
 
-    def _prepare_features(
-        self, df: pd.DataFrame
-    ) -> Tuple[np.ndarray, pd.Index]:
-        """Extract and clean the feature matrix for HMM fitting/inference."""
+    def _prepare_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        self._require_columns(df)
+        X = df[self.feature_cols].copy()
+        X = (X - self._scaler_mean) / self._scaler_std
+        return X
+
+    def _check_fitted(self) -> None:
+        if not self._is_fitted:
+            raise RuntimeError(
+                "HMMRegimeDetector is not fitted. Call .fit(df) first."
+            )
+
+    def _require_columns(self, df: pd.DataFrame) -> None:
         missing = [c for c in self.feature_cols if c not in df.columns]
         if missing:
             raise KeyError(
                 f"HMMRegimeDetector requires columns {missing}. "
                 f"Available: {list(df.columns)}"
             )
-        sub = df[self.feature_cols].dropna()
-        return sub.values, sub.index
-
-    def _forward_only(self, X_scaled: np.ndarray) -> np.ndarray:
-        """
-        Compute forward-algorithm (filtered) state probabilities manually.
-
-        hmmlearn's score_samples() uses forward-backward (smoothed, has
-        lookahead). For point-in-time trading signals we need the forward
-        pass only: P(state_t | x_{1:t}), not P(state_t | x_{1:T}).
-        """
-        n_obs = len(X_scaled)
-        n_states = self.n_states
-
-        log_startprob = np.log(self._model.startprob_ + 1e-300)
-        log_transmat  = np.log(self._model.transmat_ + 1e-300)
-
-        framelogprob = self._model._compute_log_likelihood(X_scaled)
-
-        log_alpha = np.zeros((n_obs, n_states))
-        log_alpha[0] = log_startprob + framelogprob[0]
-
-        for t in range(1, n_obs):
-            for j in range(n_states):
-                log_alpha[t, j] = (
-                    self._logsumexp(log_alpha[t - 1] + log_transmat[:, j])
-                    + framelogprob[t, j]
-                )
-
-        max_per_row = log_alpha.max(axis=1, keepdims=True)
-        probs = np.exp(log_alpha - max_per_row)
-        row_sums = probs.sum(axis=1, keepdims=True)
-        row_sums[row_sums == 0] = 1.0
-        probs /= row_sums
-
-        return probs
-
-    @staticmethod
-    def _logsumexp(arr: np.ndarray) -> float:
-        m = np.max(arr)
-        return m + np.log(np.sum(np.exp(arr - m)))
-
-    def _infer_semantic_labels(
-        self,
-        X_scaled: np.ndarray,
-        model,
-    ) -> Dict[int, str]:
-        """
-        Map unlabelled HMM states to semantic regime names based on
-        learned characteristics: mean return and mean volatility
-        (in standardised feature space).
-
-        Heuristic:
-            highest vol state                          -> crisis (if n_states >= 3)
-            among remaining: highest mean return        -> trending_up
-                              lowest mean return         -> trending_down
-                              middle (if any)            -> range_bound
-        """
-        state_seq = model.predict(X_scaled)
-        ret_idx = (
-            self.feature_cols.index("returns")
-            if "returns" in self.feature_cols else 0
-        )
-        vol_idx = (
-            self.feature_cols.index("vol_21d")
-            if "vol_21d" in self.feature_cols
-            else (1 if len(self.feature_cols) > 1 else 0)
-        )
-
-        state_chars = {}
-        for s in range(self.n_states):
-            mask = state_seq == s
-            if mask.sum() == 0:
-                state_chars[s] = {"mean_ret": 0.0, "mean_vol": 0.0}
-                continue
-            state_chars[s] = {
-                "mean_ret": float(X_scaled[mask, ret_idx].mean()),
-                "mean_vol": (
-                    float(X_scaled[mask, vol_idx].mean())
-                    if len(self.feature_cols) > 1 else 0.0
-                ),
-            }
-
-        vol_ranked = sorted(
-            state_chars.items(), key=lambda kv: kv[1]["mean_vol"], reverse=True
-        )
-        crisis_state = vol_ranked[0][0] if (len(vol_ranked) > 0 and self.n_states >= 3) else None
-
-        remaining = {s: c for s, c in state_chars.items() if s != crisis_state}
-        ret_ranked = sorted(remaining.items(), key=lambda kv: kv[1]["mean_ret"], reverse=True)
-
-        labels: Dict[int, str] = {}
-        if crisis_state is not None:
-            labels[crisis_state] = "crisis"
-
-        if len(ret_ranked) >= 2:
-            labels[ret_ranked[0][0]]  = "trending_up"
-            labels[ret_ranked[-1][0]] = "trending_down"
-            for s, _ in ret_ranked[1:-1]:
-                labels[s] = "range_bound"
-        elif len(ret_ranked) == 1:
-            labels[ret_ranked[0][0]] = "range_bound"
-
-        for s in range(self.n_states):
-            if s not in labels:
-                labels[s] = "range_bound"
-
-        return labels
-
-    def _compute_regime_stats(
-        self, df: pd.DataFrame, labels: pd.Series
-    ) -> pd.DataFrame:
-        rows = []
-        ret_col = "returns" if "returns" in df.columns else self.feature_cols[0]
-        for regime in sorted(labels.dropna().unique()):
-            mask = labels == regime
-            r = df.loc[mask, ret_col].dropna() if ret_col in df.columns else pd.Series(dtype=float)
-            if len(r) < 2:
-                continue
-            mean_ann = float(r.mean() * 252)
-            vol_ann  = float(r.std() * np.sqrt(252))
-            sharpe   = float(mean_ann / vol_ann) if vol_ann > 0 else 0.0
-            rows.append({
-                "regime": regime,
-                "frequency": round(float(mask.mean()), 4),
-                "mean_return_annual": round(mean_ann, 4),
-                "vol_annual": round(vol_ann, 4),
-                "sharpe": round(sharpe, 4),
-                "n_bars": int(mask.sum()),
-            })
-        return pd.DataFrame(rows).set_index("regime") if rows else pd.DataFrame()
-
-    def _check_fitted(self) -> None:
-        if not self._fitted:
-            raise RuntimeError(
-                "HMMRegimeDetector must be fit() before predict()/predict_proba()."
-            )
 
 
 # ======================================================================
-# Adaptive Signal Switch
+# Adaptive signal switch
 # ======================================================================
 
 class AdaptiveSignalSwitch:
     """
-    Combine multiple signals using regime probabilities as continuous weights.
+    Combines multiple signals weighted by their regime favourability.
 
-    Generalises the Phase 6 binary RegimeFilter into a smooth blend:
+    Continuous generalisation of the Phase 6 binary RegimeFilter:
+        effective_signal[t] = sum_k( P(regime=k | t) * signal[t] for
+                                      every signal registered to regime k )
 
-        effective_signal(t) = Sum_k  P(regime=k, t) * signal_for_regime(k)(t)
-
-    At a regime boundary where P(trending)=0.5, P(range_bound)=0.5, the
-    output blends both signals rather than snapping discretely — this
-    reduces whipsaw trades exactly at the moments when regime classification
-    is least confident.
+    When a regime is uncertain (probabilities spread across states), the
+    output signal is a probability-weighted blend rather than a hard
+    on/off switch — avoiding discontinuous jumps at regime boundaries.
 
     Usage:
         switch = AdaptiveSignalSwitch()
-        switch.register("trending_up",   "signal_macd")
-        switch.register("trending_down", "signal_macd")
-        switch.register("range_bound",   "signal_rsi")
-        switch.register("crisis",        None)   # flat — no signal in crisis
+        switch.register("signal_rsi",   favourable=["range_bound"])
+        switch.register("signal_zscore", favourable=["range_bound"])
+        switch.register("signal_macd",  favourable=["trending_up", "trending_down"])
+        switch.register("signal_bb",    favourable=["trending_up", "trending_down"])
+        # Crisis: no registration → implicitly zero in crisis for all signals
 
         df["signal_adaptive"] = switch.apply(df, regime_probs)
     """
 
     def __init__(self):
-        self._registry: Dict[str, Optional[str]] = {}
+        self._registry: List[Tuple[str, List[str]]] = []
 
-    def register(self, regime: str, signal_col: Optional[str]) -> "AdaptiveSignalSwitch":
+    def register(self, signal_col: str, favourable: List[str]) -> "AdaptiveSignalSwitch":
         """
-        Map a regime to the signal column that should be active in it.
+        Register a signal column and the regimes it should be active in.
 
         Args:
-            regime:     Regime label (must match a column in regime_probs)
-            signal_col: Signal column to use when this regime is active.
-                       None means "flat" (always 0) in this regime.
+            signal_col: Column name of the signal (values in {-1,0,+1})
+            favourable: List of regime names where this signal should be
+                       weighted. Unlisted regimes get zero weight for
+                       this signal (e.g. crisis is implicitly excluded
+                       unless explicitly registered).
         """
-        self._registry[regime] = signal_col
+        self._registry.append((signal_col, favourable))
         return self
 
     def apply(
         self,
-        df: pd.DataFrame,
+        df:           pd.DataFrame,
         regime_probs: pd.DataFrame,
-        clip_output: bool = True,
+        normalise:    bool = True,
     ) -> pd.Series:
         """
         Compute the regime-weighted adaptive signal.
 
         Args:
             df:           DataFrame containing the registered signal columns
-            regime_probs: DataFrame of per-regime probabilities (rows sum to 1.0)
-            clip_output:  If True, round the continuous blend to the nearest
-                         of {-1, 0, +1} using sign(); if False, return the
-                         raw continuous weighted value (useful for position
-                         sizing rather than discrete signals).
+            regime_probs: DataFrame from RegimeDetectionResult.probabilities,
+                          one column per regime, rows summing to ~1.0
+            normalise:    If True, divide by the sum of weights actually
+                          used (handles partial regime coverage gracefully).
+                          If False, raw weighted sum (can be < 1 in magnitude
+                          if not all regime mass is captured by registrations).
 
         Returns:
-            Series — discrete {-1,0,+1} if clip_output, else continuous float.
+            Series with continuous-weighted signal. NOTE: this is a
+            continuous value, not strictly in {-1,0,+1} — round or
+            threshold downstream if a discrete signal is required by
+            the backtester's position-sizing logic. Most backtesters in
+            this pipeline accept continuous position_scale separately,
+            so np.sign() can be applied if a discrete signal is needed.
         """
         if not self._registry:
-            result = pd.Series(0, index=df.index, name="signal_adaptive")
-            return result.astype(int) if clip_output else result
+            raise ValueError("No signals registered. Call .register() first.")
 
-        common_idx = df.index.intersection(regime_probs.index)
+        weighted_sum = pd.Series(0.0, index=df.index)
+        weight_total = pd.Series(0.0, index=df.index)
 
-        weighted = pd.Series(0.0, index=common_idx)
-
-        for regime, signal_col in self._registry.items():
-            if regime not in regime_probs.columns:
-                logger.warning(
-                    f"Regime '{regime}' not found in regime_probs columns "
-                    f"{list(regime_probs.columns)} — skipping."
-                )
-                continue
-
-            prob = regime_probs.loc[common_idx, regime].fillna(0.0)
-
-            if signal_col is None:
-                continue  # flat in this regime — contributes 0
+        for signal_col, favourable_regimes in self._registry:
             if signal_col not in df.columns:
+                logger.warning(f"AdaptiveSignalSwitch: '{signal_col}' not in df, skipping.")
+                continue
+
+            available = [r for r in favourable_regimes if r in regime_probs.columns]
+            if not available:
                 logger.warning(
-                    f"Signal column '{signal_col}' not found for regime "
-                    f"'{regime}' — treating as flat."
+                    f"AdaptiveSignalSwitch: none of {favourable_regimes} found in "
+                    f"regime_probs columns {list(regime_probs.columns)}."
                 )
                 continue
 
-            sig = df.loc[common_idx, signal_col].fillna(0)
-            weighted = weighted.add(prob * sig, fill_value=0.0)
+            weight = regime_probs[available].sum(axis=1).fillna(0)
+            sig = df[signal_col].fillna(0)
 
-        result = weighted.reindex(df.index, fill_value=0.0)
+            weighted_sum += weight * sig
+            weight_total += weight
 
-        if clip_output:
-            return np.sign(result).astype(int).rename("signal_adaptive")
-        return result.rename("signal_adaptive_continuous")
+        if normalise:
+            result = weighted_sum / weight_total.replace(0, np.nan)
+            result = result.fillna(0.0)
+        else:
+            result = weighted_sum
 
-    def registry_summary(self) -> pd.DataFrame:
-        """Return the current regime->signal mapping as a DataFrame."""
-        return pd.DataFrame([
-            {"regime": k, "signal": v or "flat"}
-            for k, v in self._registry.items()
-        ]).set_index("regime")
+        result.name = "signal_adaptive"
+        return result
+
+    def apply_discrete(
+        self,
+        df:           pd.DataFrame,
+        regime_probs: pd.DataFrame,
+        threshold:    float = 0.0,
+    ) -> pd.Series:
+        """
+        Convenience wrapper: applies the continuous switch, then discretises
+        to {-1, 0, +1} via sign() with a deadband around zero.
+
+        Args:
+            threshold: |continuous signal| must exceed this to register as
+                      non-zero. Filters out weak/uncertain blended signals.
+        """
+        continuous = self.apply(df, regime_probs, normalise=True)
+        discrete = pd.Series(0, index=df.index)
+        discrete[continuous > threshold]  = 1
+        discrete[continuous < -threshold] = -1
+        discrete.name = "signal_adaptive_discrete"
+        return discrete
+
+    def coverage_report(self, regime_probs: pd.DataFrame) -> dict:
+        """
+        Diagnostic: which regimes have registered signals, and which are
+        implicitly zero-weighted (e.g. crisis with no registration).
+        """
+        all_regimes = set(regime_probs.columns)
+        covered = set()
+        for _, favourable in self._registry:
+            covered.update(favourable)
+
+        return {
+            "all_regimes":       sorted(all_regimes),
+            "covered_regimes":   sorted(covered & all_regimes),
+            "uncovered_regimes": sorted(all_regimes - covered),
+            "n_signals_registered": len(self._registry),
+        }
