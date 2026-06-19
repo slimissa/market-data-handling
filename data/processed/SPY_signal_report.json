@@ -1789,6 +1789,17 @@
       1
     ]
   },
+  "signal_adaptive": {
+    "turnover": 0.1296,
+    "long_pct": 0.3333,
+    "short_pct": 0.2812,
+    "flat_pct": 0.3855,
+    "unique_vals": [
+      -1,
+      0,
+      1
+    ]
+  },
   "signal_correlation": {
     "signal_rsi": {
       "signal_rsi": 1.0,
@@ -1799,7 +1810,8 @@
       "signal_zscore_strength": 0.129,
       "signal_bb": -0.098,
       "signal_bb_strength": 0.009,
-      "signal_ensemble": 0.59
+      "signal_ensemble": 0.59,
+      "signal_adaptive": -0.027
     },
     "signal_rsi_strength": {
       "signal_rsi": -0.22,
@@ -1810,7 +1822,8 @@
       "signal_zscore_strength": 0.526,
       "signal_bb": 0.012,
       "signal_bb_strength": -0.018,
-      "signal_ensemble": -0.11
+      "signal_ensemble": -0.11,
+      "signal_adaptive": 0.102
     },
     "signal_macd": {
       "signal_rsi": -0.124,
@@ -1821,7 +1834,8 @@
       "signal_zscore_strength": -0.035,
       "signal_bb": 0.13,
       "signal_bb_strength": -0.042,
-      "signal_ensemble": 0.549
+      "signal_ensemble": 0.549,
+      "signal_adaptive": 0.763
     },
     "signal_macd_strength": {
       "signal_rsi": 0.223,
@@ -1832,7 +1846,8 @@
       "signal_zscore_strength": 0.19,
       "signal_bb": -0.083,
       "signal_bb_strength": -0.046,
-      "signal_ensemble": 0.143
+      "signal_ensemble": 0.143,
+      "signal_adaptive": -0.063
     },
     "signal_zscore": {
       "signal_rsi": 0.635,
@@ -1843,7 +1858,8 @@
       "signal_zscore_strength": 0.096,
       "signal_bb": -0.063,
       "signal_bb_strength": 0.01,
-      "signal_ensemble": 0.571
+      "signal_ensemble": 0.571,
+      "signal_adaptive": -0.056
     },
     "signal_zscore_strength": {
       "signal_rsi": 0.129,
@@ -1854,7 +1870,8 @@
       "signal_zscore_strength": 1.0,
       "signal_bb": -0.084,
       "signal_bb_strength": -0.014,
-      "signal_ensemble": 0.075
+      "signal_ensemble": 0.075,
+      "signal_adaptive": 0.03
     },
     "signal_bb": {
       "signal_rsi": -0.098,
@@ -1865,7 +1882,8 @@
       "signal_zscore_strength": -0.084,
       "signal_bb": 1.0,
       "signal_bb_strength": -0.308,
-      "signal_ensemble": 0.044
+      "signal_ensemble": 0.044,
+      "signal_adaptive": 0.119
     },
     "signal_bb_strength": {
       "signal_rsi": 0.009,
@@ -1876,7 +1894,8 @@
       "signal_zscore_strength": -0.014,
       "signal_bb": -0.308,
       "signal_bb_strength": 1.0,
-      "signal_ensemble": -0.037
+      "signal_ensemble": -0.037,
+      "signal_adaptive": -0.062
     },
     "signal_ensemble": {
       "signal_rsi": 0.59,
@@ -1887,7 +1906,20 @@
       "signal_zscore_strength": 0.075,
       "signal_bb": 0.044,
       "signal_bb_strength": -0.037,
-      "signal_ensemble": 1.0
+      "signal_ensemble": 1.0,
+      "signal_adaptive": 0.426
+    },
+    "signal_adaptive": {
+      "signal_rsi": -0.027,
+      "signal_rsi_strength": 0.102,
+      "signal_macd": 0.763,
+      "signal_macd_strength": -0.063,
+      "signal_zscore": -0.056,
+      "signal_zscore_strength": 0.03,
+      "signal_bb": 0.119,
+      "signal_bb_strength": -0.062,
+      "signal_ensemble": 0.426,
+      "signal_adaptive": 1.0
     }
   }
 }

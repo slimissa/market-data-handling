@@ -1,0 +1,643 @@
+{
+  "ticker": "AAPL",
+  "regressions": {
+    "signal_rsi": [
+      {
+        "model": "CAPM",
+        "alpha_annual": 0.0,
+        "alpha_daily": 0.0,
+        "t_stat": 0.0,
+        "p_value": 1.0,
+        "significant": false,
+        "r2": 0.0,
+        "adj_r2": 0.0,
+        "ic": 0.0,
+        "ir": 0.0,
+        "n_obs": 0,
+        "betas": {
+          "MKT": 0.0
+        }
+      },
+      {
+        "model": "FF3",
+        "alpha_annual": 0.0,
+        "alpha_daily": 0.0,
+        "t_stat": 0.0,
+        "p_value": 1.0,
+        "significant": false,
+        "r2": 0.0,
+        "adj_r2": 0.0,
+        "ic": 0.0,
+        "ir": 0.0,
+        "n_obs": 0,
+        "betas": {
+          "MKT": 0.0,
+          "SMB": 0.0,
+          "HML": 0.0
+        }
+      },
+      {
+        "model": "Carhart4",
+        "alpha_annual": 0.0,
+        "alpha_daily": 0.0,
+        "t_stat": 0.0,
+        "p_value": 1.0,
+        "significant": false,
+        "r2": 0.0,
+        "adj_r2": 0.0,
+        "ic": 0.0,
+        "ir": 0.0,
+        "n_obs": 0,
+        "betas": {
+          "MKT": 0.0,
+          "SMB": 0.0,
+          "HML": 0.0,
+          "MOM": 0.0
+        }
+      }
+    ],
+    "signal_macd": [
+      {
+        "model": "CAPM",
+        "alpha_annual": 0.0,
+        "alpha_daily": 0.0,
+        "t_stat": 0.0,
+        "p_value": 1.0,
+        "significant": false,
+        "r2": 0.0,
+        "adj_r2": 0.0,
+        "ic": 0.0,
+        "ir": 0.0,
+        "n_obs": 0,
+        "betas": {
+          "MKT": 0.0
+        }
+      },
+      {
+        "model": "FF3",
+        "alpha_annual": 0.0,
+        "alpha_daily": 0.0,
+        "t_stat": 0.0,
+        "p_value": 1.0,
+        "significant": false,
+        "r2": 0.0,
+        "adj_r2": 0.0,
+        "ic": 0.0,
+        "ir": 0.0,
+        "n_obs": 0,
+        "betas": {
+          "MKT": 0.0,
+          "SMB": 0.0,
+          "HML": 0.0
+        }
+      },
+      {
+        "model": "Carhart4",
+        "alpha_annual": 0.0,
+        "alpha_daily": 0.0,
+        "t_stat": 0.0,
+        "p_value": 1.0,
+        "significant": false,
+        "r2": 0.0,
+        "adj_r2": 0.0,
+        "ic": 0.0,
+        "ir": 0.0,
+        "n_obs": 0,
+        "betas": {
+          "MKT": 0.0,
+          "SMB": 0.0,
+          "HML": 0.0,
+          "MOM": 0.0
+        }
+      }
+    ],
+    "signal_zscore": [
+      {
+        "model": "CAPM",
+        "alpha_annual": 0.0,
+        "alpha_daily": 0.0,
+        "t_stat": 0.0,
+        "p_value": 1.0,
+        "significant": false,
+        "r2": 0.0,
+        "adj_r2": 0.0,
+        "ic": 0.0,
+        "ir": 0.0,
+        "n_obs": 0,
+        "betas": {
+          "MKT": 0.0
+        }
+      },
+      {
+        "model": "FF3",
+        "alpha_annual": 0.0,
+        "alpha_daily": 0.0,
+        "t_stat": 0.0,
+        "p_value": 1.0,
+        "significant": false,
+        "r2": 0.0,
+        "adj_r2": 0.0,
+        "ic": 0.0,
+        "ir": 0.0,
+        "n_obs": 0,
+        "betas": {
+          "MKT": 0.0,
+          "SMB": 0.0,
+          "HML": 0.0
+        }
+      },
+      {
+        "model": "Carhart4",
+        "alpha_annual": 0.0,
+        "alpha_daily": 0.0,
+        "t_stat": 0.0,
+        "p_value": 1.0,
+        "significant": false,
+        "r2": 0.0,
+        "adj_r2": 0.0,
+        "ic": 0.0,
+        "ir": 0.0,
+        "n_obs": 0,
+        "betas": {
+          "MKT": 0.0,
+          "SMB": 0.0,
+          "HML": 0.0,
+          "MOM": 0.0
+        }
+      }
+    ],
+    "signal_bb": [
+      {
+        "model": "CAPM",
+        "alpha_annual": 0.0,
+        "alpha_daily": 0.0,
+        "t_stat": 0.0,
+        "p_value": 1.0,
+        "significant": false,
+        "r2": 0.0,
+        "adj_r2": 0.0,
+        "ic": 0.0,
+        "ir": 0.0,
+        "n_obs": 0,
+        "betas": {
+          "MKT": 0.0
+        }
+      },
+      {
+        "model": "FF3",
+        "alpha_annual": 0.0,
+        "alpha_daily": 0.0,
+        "t_stat": 0.0,
+        "p_value": 1.0,
+        "significant": false,
+        "r2": 0.0,
+        "adj_r2": 0.0,
+        "ic": 0.0,
+        "ir": 0.0,
+        "n_obs": 0,
+        "betas": {
+          "MKT": 0.0,
+          "SMB": 0.0,
+          "HML": 0.0
+        }
+      },
+      {
+        "model": "Carhart4",
+        "alpha_annual": 0.0,
+        "alpha_daily": 0.0,
+        "t_stat": 0.0,
+        "p_value": 1.0,
+        "significant": false,
+        "r2": 0.0,
+        "adj_r2": 0.0,
+        "ic": 0.0,
+        "ir": 0.0,
+        "n_obs": 0,
+        "betas": {
+          "MKT": 0.0,
+          "SMB": 0.0,
+          "HML": 0.0,
+          "MOM": 0.0
+        }
+      }
+    ],
+    "signal_ensemble": [
+      {
+        "model": "CAPM",
+        "alpha_annual": 0.0,
+        "alpha_daily": 0.0,
+        "t_stat": 0.0,
+        "p_value": 1.0,
+        "significant": false,
+        "r2": 0.0,
+        "adj_r2": 0.0,
+        "ic": 0.0,
+        "ir": 0.0,
+        "n_obs": 0,
+        "betas": {
+          "MKT": 0.0
+        }
+      },
+      {
+        "model": "FF3",
+        "alpha_annual": 0.0,
+        "alpha_daily": 0.0,
+        "t_stat": 0.0,
+        "p_value": 1.0,
+        "significant": false,
+        "r2": 0.0,
+        "adj_r2": 0.0,
+        "ic": 0.0,
+        "ir": 0.0,
+        "n_obs": 0,
+        "betas": {
+          "MKT": 0.0,
+          "SMB": 0.0,
+          "HML": 0.0
+        }
+      },
+      {
+        "model": "Carhart4",
+        "alpha_annual": 0.0,
+        "alpha_daily": 0.0,
+        "t_stat": 0.0,
+        "p_value": 1.0,
+        "significant": false,
+        "r2": 0.0,
+        "adj_r2": 0.0,
+        "ic": 0.0,
+        "ir": 0.0,
+        "n_obs": 0,
+        "betas": {
+          "MKT": 0.0,
+          "SMB": 0.0,
+          "HML": 0.0,
+          "MOM": 0.0
+        }
+      }
+    ],
+    "signal_adaptive": [
+      {
+        "model": "CAPM",
+        "alpha_annual": 0.0,
+        "alpha_daily": 0.0,
+        "t_stat": 0.0,
+        "p_value": 1.0,
+        "significant": false,
+        "r2": 0.0,
+        "adj_r2": 0.0,
+        "ic": 0.0,
+        "ir": 0.0,
+        "n_obs": 0,
+        "betas": {
+          "MKT": 0.0
+        }
+      },
+      {
+        "model": "FF3",
+        "alpha_annual": 0.0,
+        "alpha_daily": 0.0,
+        "t_stat": 0.0,
+        "p_value": 1.0,
+        "significant": false,
+        "r2": 0.0,
+        "adj_r2": 0.0,
+        "ic": 0.0,
+        "ir": 0.0,
+        "n_obs": 0,
+        "betas": {
+          "MKT": 0.0,
+          "SMB": 0.0,
+          "HML": 0.0
+        }
+      },
+      {
+        "model": "Carhart4",
+        "alpha_annual": 0.0,
+        "alpha_daily": 0.0,
+        "t_stat": 0.0,
+        "p_value": 1.0,
+        "significant": false,
+        "r2": 0.0,
+        "adj_r2": 0.0,
+        "ic": 0.0,
+        "ir": 0.0,
+        "n_obs": 0,
+        "betas": {
+          "MKT": 0.0,
+          "SMB": 0.0,
+          "HML": 0.0,
+          "MOM": 0.0
+        }
+      }
+    ]
+  },
+  "attribution_table": [
+    {
+      "signal": "signal_rsi",
+      "model": "CAPM",
+      "alpha_annual": 0.0,
+      "t_stat": 0.0,
+      "p_value": 1.0,
+      "significant": false,
+      "r2": 0.0,
+      "adj_r2": 0.0,
+      "ic": 0.0,
+      "ir": 0.0,
+      "n_obs": 0,
+      "beta_MKT": 0.0,
+      "beta_SMB": NaN,
+      "beta_HML": NaN,
+      "beta_MOM": NaN
+    },
+    {
+      "signal": "signal_rsi",
+      "model": "FF3",
+      "alpha_annual": 0.0,
+      "t_stat": 0.0,
+      "p_value": 1.0,
+      "significant": false,
+      "r2": 0.0,
+      "adj_r2": 0.0,
+      "ic": 0.0,
+      "ir": 0.0,
+      "n_obs": 0,
+      "beta_MKT": 0.0,
+      "beta_SMB": 0.0,
+      "beta_HML": 0.0,
+      "beta_MOM": NaN
+    },
+    {
+      "signal": "signal_rsi",
+      "model": "Carhart4",
+      "alpha_annual": 0.0,
+      "t_stat": 0.0,
+      "p_value": 1.0,
+      "significant": false,
+      "r2": 0.0,
+      "adj_r2": 0.0,
+      "ic": 0.0,
+      "ir": 0.0,
+      "n_obs": 0,
+      "beta_MKT": 0.0,
+      "beta_SMB": 0.0,
+      "beta_HML": 0.0,
+      "beta_MOM": 0.0
+    },
+    {
+      "signal": "signal_macd",
+      "model": "CAPM",
+      "alpha_annual": 0.0,
+      "t_stat": 0.0,
+      "p_value": 1.0,
+      "significant": false,
+      "r2": 0.0,
+      "adj_r2": 0.0,
+      "ic": 0.0,
+      "ir": 0.0,
+      "n_obs": 0,
+      "beta_MKT": 0.0,
+      "beta_SMB": NaN,
+      "beta_HML": NaN,
+      "beta_MOM": NaN
+    },
+    {
+      "signal": "signal_macd",
+      "model": "FF3",
+      "alpha_annual": 0.0,
+      "t_stat": 0.0,
+      "p_value": 1.0,
+      "significant": false,
+      "r2": 0.0,
+      "adj_r2": 0.0,
+      "ic": 0.0,
+      "ir": 0.0,
+      "n_obs": 0,
+      "beta_MKT": 0.0,
+      "beta_SMB": 0.0,
+      "beta_HML": 0.0,
+      "beta_MOM": NaN
+    },
+    {
+      "signal": "signal_macd",
+      "model": "Carhart4",
+      "alpha_annual": 0.0,
+      "t_stat": 0.0,
+      "p_value": 1.0,
+      "significant": false,
+      "r2": 0.0,
+      "adj_r2": 0.0,
+      "ic": 0.0,
+      "ir": 0.0,
+      "n_obs": 0,
+      "beta_MKT": 0.0,
+      "beta_SMB": 0.0,
+      "beta_HML": 0.0,
+      "beta_MOM": 0.0
+    },
+    {
+      "signal": "signal_zscore",
+      "model": "CAPM",
+      "alpha_annual": 0.0,
+      "t_stat": 0.0,
+      "p_value": 1.0,
+      "significant": false,
+      "r2": 0.0,
+      "adj_r2": 0.0,
+      "ic": 0.0,
+      "ir": 0.0,
+      "n_obs": 0,
+      "beta_MKT": 0.0,
+      "beta_SMB": NaN,
+      "beta_HML": NaN,
+      "beta_MOM": NaN
+    },
+    {
+      "signal": "signal_zscore",
+      "model": "FF3",
+      "alpha_annual": 0.0,
+      "t_stat": 0.0,
+      "p_value": 1.0,
+      "significant": false,
+      "r2": 0.0,
+      "adj_r2": 0.0,
+      "ic": 0.0,
+      "ir": 0.0,
+      "n_obs": 0,
+      "beta_MKT": 0.0,
+      "beta_SMB": 0.0,
+      "beta_HML": 0.0,
+      "beta_MOM": NaN
+    },
+    {
+      "signal": "signal_zscore",
+      "model": "Carhart4",
+      "alpha_annual": 0.0,
+      "t_stat": 0.0,
+      "p_value": 1.0,
+      "significant": false,
+      "r2": 0.0,
+      "adj_r2": 0.0,
+      "ic": 0.0,
+      "ir": 0.0,
+      "n_obs": 0,
+      "beta_MKT": 0.0,
+      "beta_SMB": 0.0,
+      "beta_HML": 0.0,
+      "beta_MOM": 0.0
+    },
+    {
+      "signal": "signal_bb",
+      "model": "CAPM",
+      "alpha_annual": 0.0,
+      "t_stat": 0.0,
+      "p_value": 1.0,
+      "significant": false,
+      "r2": 0.0,
+      "adj_r2": 0.0,
+      "ic": 0.0,
+      "ir": 0.0,
+      "n_obs": 0,
+      "beta_MKT": 0.0,
+      "beta_SMB": NaN,
+      "beta_HML": NaN,
+      "beta_MOM": NaN
+    },
+    {
+      "signal": "signal_bb",
+      "model": "FF3",
+      "alpha_annual": 0.0,
+      "t_stat": 0.0,
+      "p_value": 1.0,
+      "significant": false,
+      "r2": 0.0,
+      "adj_r2": 0.0,
+      "ic": 0.0,
+      "ir": 0.0,
+      "n_obs": 0,
+      "beta_MKT": 0.0,
+      "beta_SMB": 0.0,
+      "beta_HML": 0.0,
+      "beta_MOM": NaN
+    },
+    {
+      "signal": "signal_bb",
+      "model": "Carhart4",
+      "alpha_annual": 0.0,
+      "t_stat": 0.0,
+      "p_value": 1.0,
+      "significant": false,
+      "r2": 0.0,
+      "adj_r2": 0.0,
+      "ic": 0.0,
+      "ir": 0.0,
+      "n_obs": 0,
+      "beta_MKT": 0.0,
+      "beta_SMB": 0.0,
+      "beta_HML": 0.0,
+      "beta_MOM": 0.0
+    },
+    {
+      "signal": "signal_ensemble",
+      "model": "CAPM",
+      "alpha_annual": 0.0,
+      "t_stat": 0.0,
+      "p_value": 1.0,
+      "significant": false,
+      "r2": 0.0,
+      "adj_r2": 0.0,
+      "ic": 0.0,
+      "ir": 0.0,
+      "n_obs": 0,
+      "beta_MKT": 0.0,
+      "beta_SMB": NaN,
+      "beta_HML": NaN,
+      "beta_MOM": NaN
+    },
+    {
+      "signal": "signal_ensemble",
+      "model": "FF3",
+      "alpha_annual": 0.0,
+      "t_stat": 0.0,
+      "p_value": 1.0,
+      "significant": false,
+      "r2": 0.0,
+      "adj_r2": 0.0,
+      "ic": 0.0,
+      "ir": 0.0,
+      "n_obs": 0,
+      "beta_MKT": 0.0,
+      "beta_SMB": 0.0,
+      "beta_HML": 0.0,
+      "beta_MOM": NaN
+    },
+    {
+      "signal": "signal_ensemble",
+      "model": "Carhart4",
+      "alpha_annual": 0.0,
+      "t_stat": 0.0,
+      "p_value": 1.0,
+      "significant": false,
+      "r2": 0.0,
+      "adj_r2": 0.0,
+      "ic": 0.0,
+      "ir": 0.0,
+      "n_obs": 0,
+      "beta_MKT": 0.0,
+      "beta_SMB": 0.0,
+      "beta_HML": 0.0,
+      "beta_MOM": 0.0
+    },
+    {
+      "signal": "signal_adaptive",
+      "model": "CAPM",
+      "alpha_annual": 0.0,
+      "t_stat": 0.0,
+      "p_value": 1.0,
+      "significant": false,
+      "r2": 0.0,
+      "adj_r2": 0.0,
+      "ic": 0.0,
+      "ir": 0.0,
+      "n_obs": 0,
+      "beta_MKT": 0.0,
+      "beta_SMB": NaN,
+      "beta_HML": NaN,
+      "beta_MOM": NaN
+    },
+    {
+      "signal": "signal_adaptive",
+      "model": "FF3",
+      "alpha_annual": 0.0,
+      "t_stat": 0.0,
+      "p_value": 1.0,
+      "significant": false,
+      "r2": 0.0,
+      "adj_r2": 0.0,
+      "ic": 0.0,
+      "ir": 0.0,
+      "n_obs": 0,
+      "beta_MKT": 0.0,
+      "beta_SMB": 0.0,
+      "beta_HML": 0.0,
+      "beta_MOM": NaN
+    },
+    {
+      "signal": "signal_adaptive",
+      "model": "Carhart4",
+      "alpha_annual": 0.0,
+      "t_stat": 0.0,
+      "p_value": 1.0,
+      "significant": false,
+      "r2": 0.0,
+      "adj_r2": 0.0,
+      "ic": 0.0,
+      "ir": 0.0,
+      "n_obs": 0,
+      "beta_MKT": 0.0,
+      "beta_SMB": 0.0,
+      "beta_HML": 0.0,
+      "beta_MOM": 0.0
+    }
+  ]
+}
