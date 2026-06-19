@@ -32,7 +32,6 @@ Three levels of analysis:
        Shows WHEN a signal had alpha vs. when it was purely beta.
        Regime analysis: was the signal working in 2020 crash? 2021 recovery?
        This is what you show when an interviewer asks "is it stable?"
-
     5. Signal Decomposition
        Quantifies what fraction of each signal's variance is explained by:
        - Market direction (beta)
@@ -62,6 +61,7 @@ import pandas as pd
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 import logging
+
 
 logger = logging.getLogger(__name__)
 
@@ -303,7 +303,9 @@ class FactorDataLoader:
             prices = raw[["Close"]].rename(columns={"Close": list(tickers_needed)[0]})
 
         returns = prices.pct_change().dropna()
-        returns.index = pd.to_datetime(returns.index).tz_localize("UTC")
+        # Ensure timezone-aware UTC to match pipeline DataFrames
+        if returns.index.tz is None:
+            returns.index = returns.index.tz_localize("UTC")
 
         # Build factor series
         factor_df = pd.DataFrame(index=returns.index)
@@ -377,16 +379,28 @@ class OLSRegressor:
         Returns:
             FactorRegression with all statistics
         """
-        # Align indices
-        common = y.index.intersection(X.index)
+        # Strip timezones for intersection — factor data and strategy returns
+        # may have different tz-awareness even on the same calendar dates.
+        y_idx = y.index.tz_localize(None).normalize() if hasattr(y.index, 'tz') and y.index.tz else y.index.normalize()
+        x_idx = X.index.tz_localize(None).normalize() if hasattr(X.index, 'tz') and X.index.tz else X.index.normalize()
+
+        # Use reindex to align both to the intersection
+        common = y_idx.intersection(x_idx)
         if len(common) < 30:
             logger.warning(
-                f"Only {len(common)} observations for {signal_col} — "
-                "regression may be unreliable."
+                f"Only {len(common)} common observations for {signal_col} — "
+                f"regression may be unreliable. y rows: {len(y)}, X rows: {len(X)}, "
+                f"common: {len(common)}. Check timezone alignment."
             )
-        y_aligned = y.loc[common].dropna()
-        X_aligned = X.loc[y_aligned.index].dropna()
-        y_aligned = y_aligned.loc[X_aligned.index]
+
+        y_tz_naive = y.copy()
+        y_tz_naive.index = y_idx
+        y_aligned = y_tz_naive.reindex(common).dropna()
+        X_aligned = X.reindex(common).dropna()
+        # Re-align after dropna
+        common_valid = y_aligned.index.intersection(X_aligned.index)
+        y_aligned = y_aligned.loc[common_valid]
+        X_aligned = X_aligned.loc[common_valid]
 
         n = len(y_aligned)
         k = X_aligned.shape[1]
@@ -590,6 +604,11 @@ class FactorModel:
             logger.info(f"{tag}Attributing {sig_col}...")
 
             # Excess returns: strategy - rf
+            # Strip timezone BEFORE reindex to avoid tz mismatch
+            if hasattr(ret_series.index, 'tz') and ret_series.index.tz:
+                ret_series = ret_series.copy()
+                ret_series.index = ret_series.index.tz_localize(None)
+
             rf_aligned = factor_df["RF"].reindex(ret_series.index).fillna(self.rf_daily)
             excess = ret_series - rf_aligned
 
