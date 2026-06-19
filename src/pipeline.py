@@ -89,6 +89,7 @@ class MarketDataPipeline:
             "position_sizing": "fixed_notional",
             "target_notional": 100_000,
             "cost_model":      "liquid_equity",
+            "max_drawdown_exit": None,
         },
         "factor": {
             "enabled":        True,
@@ -154,6 +155,7 @@ class MarketDataPipeline:
             position_sizing=bt_cfg["position_sizing"],
             target_notional=bt_cfg["target_notional"],
             cost_model=cost_fn(),
+            max_drawdown_exit=bt_cfg.get("max_drawdown_exit", None),
         )
 
         # Factor model
@@ -288,8 +290,8 @@ class MarketDataPipeline:
 
                     # Adaptive switching
                     if self.config["regime"].get("adaptive_enabled", True):
-                        df_signals["signal_adaptive"] = self.adaptive_switch.apply(
-                            df_signals, result.probabilities
+                        df_signals["signal_adaptive"] = self.adaptive_switch.apply_discrete(
+                            df_signals, result.probabilities, threshold=0.0
                         )
                     logger.info(
                         f"[{symbol}] Regime detection complete "
@@ -581,29 +583,42 @@ if __name__ == "__main__":
                     sharpe_str = f"  ensemble_Sharpe={s:+.2f}"
             except Exception:
                 pass
-
-        alpha_str = ""
-        f_path = pipeline._data_dir / "results" / f"{ticker}_factor_report.json"
-        if f_path.exists():
+        
+        adaptive_str = ""
+        if bt_path.exists():
             try:
-                with open(f_path) as fh:
-                    f_data = json.load(fh)
-                ens_regs = f_data.get("regressions", {}).get("signal_ensemble", [])
-                capm = next((r for r in ens_regs if r["model"] == "CAPM"), None)
-                if capm:
-                    sig_flag = "✓" if capm["significant"] else "✗"
-                    alpha_str = (
-                        f"  CAPM_alpha={capm['alpha_annual']:+.3f}"
-                        f"(t={capm['t_stat']:+.2f}{sig_flag})"
-                    )
+                bt_df = pd.read_csv(bt_path, index_col=0)
+                if "signal_adaptive" in bt_df.index and "sharpe" in bt_df.columns:
+                    a = bt_df.loc["signal_adaptive", "sharpe"]
+                    adaptive_str = f"  adaptive_Sharpe={a:+.2f}"
             except Exception:
                 pass
+
+        alpha_str = ""
+        if pipeline.config["factor"]["enabled"]:
+            f_path = pipeline._data_dir / "results" / f"{ticker}_factor_report.json"
+            if f_path.exists():
+                try:
+                    with open(f_path) as fh:
+                        f_data = json.load(fh)
+                    ens_regs = f_data.get("regressions", {}).get("signal_ensemble", [])
+                    capm = next((r for r in ens_regs if r["model"] == "CAPM"), None)
+                    if capm:
+                        sig_flag = "✓" if capm["significant"] else "✗"
+                        alpha_str = (
+                            f"  CAPM_alpha={capm['alpha_annual']:+.3f}"
+                            f"(t={capm['t_stat']:+.2f}{sig_flag})"
+                        )
+                except Exception:
+                    pass
+        else:
+            alpha_str = "  CAPM_alpha=N/A"
 
         print(
             f"  {ticker:6s}  rows={len(df):5d}  "
             f"features={len(feat_cols):2d}  "
             f"signals={len(sig_cols):2d}"
-            f"{sharpe_str}{alpha_str}"
+            f"{sharpe_str}{adaptive_str}{alpha_str}"
         )
 
     print(f"\nOutputs in: {pipeline._data_dir}/")

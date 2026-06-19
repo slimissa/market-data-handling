@@ -466,6 +466,7 @@ class VectorisedBacktester:
         vol_target: float = 0.10,    # 10% annual vol target
         cost_model: Optional[TransactionCostModel] = None,
         rf_annual: float = 0.05,
+        max_drawdown_exit: Optional[float] = None,
     ):
         """
         Args:
@@ -485,6 +486,7 @@ class VectorisedBacktester:
         self.vol_target      = vol_target
         self.cost_model      = cost_model or TransactionCostModel.liquid_equity()
         self.rf_annual       = rf_annual
+        self.max_drawdown_exit = max_drawdown_exit
         self.perf            = PerformanceEngine()
 
     # ------------------------------------------------------------------ #
@@ -556,7 +558,24 @@ class VectorisedBacktester:
         equity = pd.Series(self.initial_capital, index=df.index)
         equity = self.initial_capital + daily_pnl.cumsum()
 
-        daily_returns = daily_pnl / equity.shift(1).fillna(self.initial_capital)
+        # ---- Drawdown circuit breaker ----
+        daily_pnl_adj = daily_pnl
+        if self.max_drawdown_exit is not None and self.max_drawdown_exit > 0:
+            rolling_peak = equity.cummax()
+            drawdown = (equity - rolling_peak) / rolling_peak.replace(0, np.nan)
+            breach = drawdown < -self.max_drawdown_exit
+            if breach.any():
+                first_breach_idx = breach.idxmax()
+                shares_series.loc[first_breach_idx:] = 0
+                daily_pnl_adj = shares_series * price_change - cost_series
+                equity = pd.Series(self.initial_capital, index=df.index)
+                equity = self.initial_capital + daily_pnl_adj.cumsum()
+                logger.warning(
+                    f"[{ticker}] Max drawdown exit triggered at "
+                    f"{first_breach_idx.date()}, DD={drawdown[first_breach_idx]:.1%}"
+                )
+
+        daily_returns = daily_pnl_adj / equity.shift(1).fillna(self.initial_capital)
 
         # ---- Extract trades ----
         trades = self._extract_trades(

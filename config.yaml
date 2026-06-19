@@ -67,6 +67,7 @@ backtest:
   position_sizing:  "fixed_notional"  # fixed_shares | fixed_notional | vol_target
   target_notional:  100_000
   cost_model:       "liquid_equity"   # zero | liquid_equity | small_cap
+  max_drawdown_exit: 0.50   # force-flat if drawdown exceeds 30%
 
 # ── Factor attribution (Phase 5) ─────────────────────────────────────────
 factor:
@@ -91,9 +92,9 @@ watchlist:
 # ── Regime filtering (Phase 6) ───────────────────────────────────────────
 regime_filter:
   enabled:          true
-  vol_percentile:   30.0    # mean-reversion signals: active when vol < P30
-  max_trend_annual: 0.10    # suppress mean-reversion when |trend| > 10%/yr
-  bb_percentile:    40.0    # zscore gate: active when bb_width < P40
+  vol_percentile:   20.0    # mean-reversion signals: active when vol < P30
+  max_trend_annual: 0.05    # suppress mean-reversion when |trend| > 10%/yr
+  bb_percentile:    25.0    # zscore gate: active when bb_width < P40
   
 
 # ── Regime detection (Phase 7) ───────────────────────────────────────────
