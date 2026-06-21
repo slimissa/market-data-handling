@@ -93,6 +93,70 @@ def ols():
 
 class TestOLSRegressor:
 
+    def test_mismatched_timezones_still_align_on_calendar_date(self, ols):
+        """
+        Regression test for the production bug where strategy returns
+        (US/Eastern, from the cleaning pipeline's configured timezone) and
+        factor returns (UTC, from yfinance/Ken-French) were both tz-aware
+        but in DIFFERENT timezones. Even on identical calendar dates,
+        '2020-01-02 00:00:00-05:00' (Eastern) and '2020-01-02 00:00:00+00:00'
+        (UTC) are different instants, so a naive .intersection() between
+        them silently returns empty — and worse, an earlier (broken) fix
+        attempt computed a correct tz-naive intersection but then reindexed
+        the still-tz-aware original Series/DataFrame against it, which also
+        produces zero matching rows. The net effect in production: every
+        factor regression reported "0 observations" and an empty/zero
+        FactorRegression, even though 100% of the calendar dates overlapped.
+
+        This test fails on either bug if reintroduced.
+        """
+        n = 300
+        rng = np.random.default_rng(11)
+
+        # Factor data: UTC, like real yfinance/Ken-French output
+        x_idx = pd.date_range("2020-01-01", periods=n, freq="D", tz="UTC")
+        X = pd.DataFrame(
+            {"MKT": 0.0003 + 0.01 * rng.standard_normal(n)},
+            index=x_idx,
+        )
+
+        # Strategy returns: US/Eastern, like the cleaning pipeline's output
+        # (same calendar dates as X, deliberately different timezone)
+        y_idx = pd.date_range("2020-01-01", periods=n, freq="D", tz="US/Eastern")
+        y = pd.Series(
+            0.0002 + 1.0 * X["MKT"].values + 0.002 * rng.standard_normal(n),
+            index=y_idx,
+        )
+
+        reg = ols.fit(y, X, signal_col="test_tz_mismatch", model_name="CAPM")
+
+        assert reg.n_obs == n, (
+            f"Expected all {n} calendar-overlapping observations to be used, "
+            f"got n_obs={reg.n_obs}. This indicates the timezone-alignment "
+            f"bug has been reintroduced: tz-aware indices in different "
+            f"timezones are not being reconciled before reindex/intersection."
+        )
+        # With y constructed as MKT + small noise, beta should recover ~1.0
+        assert abs(reg.betas["MKT"] - 1.0) < 0.15
+        assert reg.r2 > 0.8
+
+    def test_tz_naive_and_tz_aware_mix_still_aligns(self, ols):
+        """
+        One side tz-naive, the other tz-aware — must still align correctly
+        on calendar date after stripping timezone from the aware side.
+        """
+        n = 100
+        rng = np.random.default_rng(13)
+
+        x_idx = pd.date_range("2021-01-01", periods=n, freq="D")  # tz-naive
+        X = pd.DataFrame({"MKT": 0.01 * rng.standard_normal(n)}, index=x_idx)
+
+        y_idx = pd.date_range("2021-01-01", periods=n, freq="D", tz="UTC")
+        y = pd.Series(X["MKT"].values + 0.001 * rng.standard_normal(n), index=y_idx)
+
+        reg = ols.fit(y, X, signal_col="test_mixed_tz", model_name="CAPM")
+        assert reg.n_obs == n
+
     def test_beta_one_for_identical_series(self, ols, factor_df):
         """
         If strategy = market, CAPM beta should be 1.0 and alpha ≈ 0.

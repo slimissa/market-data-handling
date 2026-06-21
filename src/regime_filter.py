@@ -420,6 +420,195 @@ class CompositeCondition(RegimeCondition):
 # RegimeFilter — the main wrapper
 # ======================================================================
 
+class TrendConfirmationCondition(RegimeCondition):
+    """
+    Gate: the signal's own current direction agrees with MACD-line sign.
+
+    Rationale (closes a structural gap vs the mean-reversion gates):
+        rsi_filter() and zscore_filter() are both two-condition AND gates
+        (vol percentile AND trend/BB-width). macd_filter() and
+        bb_breakout_filter() were single-condition gates — vol-above-
+        percentile only, with no check that the trend the signal is
+        betting on is still actually confirmed. A trend-following signal
+        could stay long deep into a reversal as long as vol stayed
+        elevated, because elevated vol alone doesn't mean the ORIGINAL
+        trend direction is still intact — it could be elevated because
+        the trend just reversed violently.
+
+        signal == +1  AND macd_line > 0   → confirmed uptrend, stay long
+        signal == -1  AND macd_line < 0   → confirmed downtrend, stay short
+        signal != 0   AND macd disagrees  → trend has turned, suppress
+
+    This is direction-aware (unlike MACDCondition's fixed direction
+    parameter): it checks agreement with whatever the wrapped signal is
+    currently saying, not a hardcoded "always long" or "always short"
+    bias — appropriate for signals that trade both directions.
+
+    Args:
+        signal_col: The signal column being gated (its own sign is read
+                   here, separately from the value RegimeFilter eventually
+                   passes through — this lets the gate disagree with a
+                   signal that has gone stale).
+        macd_col:   MACD line column used as the confirmation reference.
+        min_macd_magnitude: Minimum |macd_line| required to count as a
+                   genuine confirmation, not noise near zero. Expressed
+                   as a rolling percentile of |macd_line| history so it
+                   adapts to the ticker's typical MACD scale.
+        lookback:   Rolling window for the magnitude percentile.
+    """
+
+    def __init__(
+        self,
+        signal_col:          str   = "signal_macd",
+        macd_col:             str   = "macd_line",
+        min_macd_magnitude:   float = 25.0,   # percentile, 0 = no minimum
+        lookback:             int   = 252,
+    ):
+        self.signal_col         = signal_col
+        self.macd_col            = macd_col
+        self.min_macd_magnitude  = min_macd_magnitude
+        self.lookback            = lookback
+
+    def evaluate(self, df: pd.DataFrame) -> pd.Series:
+        missing = [c for c in (self.signal_col, self.macd_col) if c not in df.columns]
+        if missing:
+            logger.warning(f"TrendConfirmationCondition: missing columns {missing}.")
+            return pd.Series(False, index=df.index)
+
+        signal = df[self.signal_col].fillna(0)
+        macd   = df[self.macd_col]
+
+        agrees = (
+            ((signal > 0) & (macd > 0)) |
+            ((signal < 0) & (macd < 0))
+        )
+
+        if self.min_macd_magnitude > 0:
+            mag_threshold = macd.abs().rolling(
+                self.lookback, min_periods=self.lookback // 4
+            ).quantile(self.min_macd_magnitude / 100)
+            strong_enough = macd.abs() >= mag_threshold.fillna(macd.abs().median())
+            agrees = agrees & strong_enough
+
+        return agrees.fillna(False)
+
+    def __repr__(self) -> str:
+        return (
+            f"TrendConfirmation({self.signal_col} agrees with "
+            f"sign({self.macd_col}), min_mag=P{self.min_macd_magnitude:.0f})"
+        )
+
+
+class SignalDrawdownCondition(RegimeCondition):
+    """
+    Gate: per-signal running drawdown breaker — a resettable backstop
+    independent of the global portfolio-level circuit breaker in
+    VectorisedBacktester.
+
+    Rationale:
+        VectorisedBacktester.max_drawdown_exit is a ONE-SHOT, PERMANENT
+        breaker: once triggered, it zeros the position for the rest of
+        the entire backtest (the position is `shares_series.loc[
+        first_breach_idx:] = 0`, applied once, never re-evaluated). That
+        is appropriate behaviour for "the whole portfolio blew up, stop
+        trading" — but wrong as a per-signal mechanism: a single bad
+        regime call early in a multi-year backtest should not
+        permanently disable a signal that might recover and perform
+        correctly in a later, genuinely favourable regime.
+
+        This condition instead computes a lightweight simulated P&L for
+        the SIGNAL IN ISOLATION (sign(signal) * daily return, no
+        position sizing, no transaction costs — a fast proxy, not a
+        full backtest) and tracks its own running drawdown from its own
+        running peak. When that drawdown breaches `max_dd`, the gate
+        goes False (suppressing the signal) until the simulated equity
+        recovers to within `recovery_threshold` of its prior peak — at
+        which point the gate re-opens automatically. This is what makes
+        it a genuine circuit BREAKER rather than a one-time kill switch:
+        it can fire, suppress, recover, and fire again across the same
+        backtest.
+
+        This directly targets the -89.3% / -73.9% MSFT class of
+        drawdown: those occurred because nothing was watching the
+        signal's own equity curve before it ever reached portfolio-level
+        risk management. A signal that is "regime-favourable" by the
+        other gates can still be wrong in that regime; this condition
+        is the backstop for exactly that case.
+
+    Args:
+        signal_col: Signal column to simulate (reads its own sign,
+                   independent of what RegimeFilter ultimately passes
+                   through — same design as TrendConfirmationCondition).
+        return_col: Daily return column used for the P&L proxy.
+        max_dd:     Maximum allowable drawdown (positive fraction, e.g.
+                   0.15 = 15%) of the signal's own simulated equity
+                   before the gate suppresses it.
+        recovery_threshold: Fraction of the prior peak the simulated
+                   equity must recover to before the gate re-opens.
+                   1.0 = must reach a new equity high. 0.9 = must
+                   recover to within 10% of the prior peak. Lower values
+                   re-enable the signal sooner after a drawdown.
+    """
+
+    def __init__(
+        self,
+        signal_col:          str   = "signal_macd",
+        return_col:           str   = "returns",
+        max_dd:                float = 0.15,
+        recovery_threshold:    float = 0.95,
+    ):
+        self.signal_col          = signal_col
+        self.return_col           = return_col
+        self.max_dd                = max_dd
+        self.recovery_threshold    = recovery_threshold
+
+    def evaluate(self, df: pd.DataFrame) -> pd.Series:
+        missing = [c for c in (self.signal_col, self.return_col) if c not in df.columns]
+        if missing:
+            logger.warning(f"SignalDrawdownCondition: missing columns {missing}.")
+            return pd.Series(True, index=df.index)  # fail open: don't block on missing data
+
+        signal = df[self.signal_col].fillna(0)
+        ret    = df[self.return_col].fillna(0)
+
+        # Lagged signal: today's P&L reflects yesterday's position,
+        # consistent with the execution-lag convention used everywhere
+        # else in this pipeline (signal at t -> fill at t+1).
+        sim_pnl = signal.shift(1).fillna(0) * ret
+        sim_equity = (1.0 + sim_pnl).cumprod()
+
+        n = len(sim_equity)
+        gate = pd.Series(True, index=df.index)
+        peak = 1.0
+        breaker_active = False
+
+        equity_vals = sim_equity.values
+        for i in range(n):
+            e = equity_vals[i]
+            if not breaker_active:
+                peak = max(peak, e)
+                dd = (e - peak) / peak if peak > 0 else 0.0
+                if dd < -self.max_dd:
+                    breaker_active = True
+                    gate.iloc[i] = False
+                # else: gate stays True (default), peak tracked
+            else:
+                # Breaker is active: stay suppressed until simulated
+                # equity recovers to recovery_threshold * peak.
+                gate.iloc[i] = False
+                if peak > 0 and e >= self.recovery_threshold * peak:
+                    breaker_active = False
+                    peak = e  # reset tracking from the recovery point
+
+        return gate
+
+    def __repr__(self) -> str:
+        return (
+            f"SignalDrawdown({self.signal_col}: max_dd={self.max_dd:.0%}, "
+            f"recovery={self.recovery_threshold:.0%})"
+        )
+
+
 class RegimeFilter:
     """
     Wraps any signal column, zeroing it out in unfavourable regimes.
@@ -561,15 +750,26 @@ class RegimeFilterPresets:
     """
 
     @staticmethod
+    @staticmethod
     def rsi_filter(
         signal_col: str = "signal_rsi",
-        vol_percentile: float = 30.0,
-        max_trend_annual: float = 0.10,
+        vol_percentile: float = 20.0,
+        max_trend_annual: float = 0.06,
+        max_dd: float = 0.15,
     ) -> RegimeFilter:
         """
-        RSI mean-reversion: active only in low-vol, weak-trend regime.
+        RSI mean-reversion: active only in low-vol, weak-trend regime,
+        with a resettable per-signal drawdown backstop.
 
-        Gate: vol_21d < P30 of trailing year AND |63d return| < 10%/yr
+        Gate: vol_21d < P20 of trailing year
+              AND |63d return| < 6%/yr
+              AND signal's own simulated drawdown < 15% (resettable)
+
+        Tightened from the original P30/10%-per-year thresholds: those
+        let through enough borderline-regime trades that the gated
+        signal's drawdown was still meaningfully larger than necessary.
+        P20/6%-per-year is stricter — fewer trades, but each one is in a
+        regime more confidently range-bound.
 
         Rationale from Phase 5:
             RSI Sharpe = +5.0 in range_bound, -0.75 in trending_up.
@@ -581,6 +781,7 @@ class RegimeFilterPresets:
             conditions=[
                 VolPercentileCondition(col="vol_21d", lookback=252, percentile=vol_percentile),
                 TrendCondition(return_col="returns", window=63, max_trend=max_trend_annual),
+                SignalDrawdownCondition(signal_col=signal_col, return_col="returns", max_dd=max_dd),
             ],
             logic="AND",
             output_col=f"{signal_col}_vol_trend_gated",
@@ -589,19 +790,26 @@ class RegimeFilterPresets:
     @staticmethod
     def zscore_filter(
         signal_col: str = "signal_zscore",
-        vol_percentile: float = 35.0,
-        bb_percentile: float = 40.0,
+        vol_percentile: float = 25.0,
+        bb_percentile: float = 25.0,
+        max_dd: float = 0.15,
     ) -> RegimeFilter:
         """
-        Z-score mean-reversion: active in low-vol + Bollinger squeeze regime.
+        Z-score mean-reversion: active in low-vol + Bollinger squeeze
+        regime, with a resettable per-signal drawdown backstop.
 
-        Gate: vol_21d < P35 AND bb_width < P40 (narrow bands = range-bound)
+        Gate: vol_21d < P25 AND bb_width < P25 (narrow bands = range-bound)
+              AND signal's own simulated drawdown < 15% (resettable)
+
+        Tightened from P35/P40 — narrower squeeze requirement means the
+        signal only fires when the market is more confidently range-bound.
         """
         return RegimeFilter(
             signal_col=signal_col,
             conditions=[
                 VolPercentileCondition(col="vol_21d", lookback=252, percentile=vol_percentile),
                 BBWidthCondition(bb_col="bb_width", lookback=252, percentile=bb_percentile),
+                SignalDrawdownCondition(signal_col=signal_col, return_col="returns", max_dd=max_dd),
             ],
             logic="AND",
             output_col=f"{signal_col}_vol_bb_gated",
@@ -610,15 +818,34 @@ class RegimeFilterPresets:
     @staticmethod
     def macd_filter(
         signal_col: str = "signal_macd",
-        vol_percentile: float = 60.0,
+        vol_percentile: float = 50.0,
+        max_dd: float = 0.20,
     ) -> RegimeFilter:
         """
-        MACD trend-following: active when vol is elevated (trending market).
+        MACD trend-following: active when vol is elevated AND the
+        signal's own current direction is confirmed by MACD sign, with a
+        resettable per-signal drawdown backstop.
 
-        Gate: vol_21d > P40 (elevated vol = directional move = trend-following works)
+        Gate: vol_21d > P50 (elevated vol = directional move)
+              AND signal direction agrees with MACD-line sign (confirmed,
+                  not stale — see TrendConfirmationCondition)
+              AND signal's own simulated drawdown < 20% (resettable)
+
+        PREVIOUSLY: this was a single-condition gate (vol-above-percentile
+        only), structurally weaker than rsi_filter/zscore_filter's
+        two-condition AND gates. Elevated vol alone doesn't confirm the
+        trend the signal is betting on is still intact — vol can be
+        elevated because a trend just reversed violently. Adding
+        TrendConfirmationCondition closes that gap: the gate now requires
+        genuine, currently-confirmed trend agreement, not just "the
+        market is moving."
+
+        max_dd is wider than the mean-reversion gates (20% vs 15%)
+        because trend-following inherently tolerates deeper pullbacks
+        before a trend is invalidated — too tight a stop here would cut
+        genuine trends on normal volatility, not just bad regime calls.
 
         Rationale: MACD Sharpe = +1.18 in trending_up, -1.30 in range_bound.
-        Suppressing MACD during low-vol range-bound periods removes the drag.
         """
         return RegimeFilter(
             signal_col=signal_col,
@@ -628,6 +855,11 @@ class RegimeFilterPresets:
                     percentile=100 - vol_percentile,
                     mode="above"
                 ),
+                TrendConfirmationCondition(
+                    signal_col=signal_col, macd_col="macd_line",
+                    min_macd_magnitude=25.0,
+                ),
+                SignalDrawdownCondition(signal_col=signal_col, return_col="returns", max_dd=max_dd),
             ],
             logic="AND",
             output_col=f"{signal_col}_trend_gated",
@@ -636,12 +868,22 @@ class RegimeFilterPresets:
     @staticmethod
     def bb_breakout_filter(
         signal_col: str = "signal_bb",
-        vol_percentile: float = 50.0,
+        vol_percentile: float = 60.0,
+        max_dd: float = 0.20,
     ) -> RegimeFilter:
         """
-        Bollinger breakout: active when vol is rising (breakout from squeeze).
+        Bollinger breakout: active when vol is rising AND the signal's
+        own direction is confirmed by MACD sign, with a resettable
+        per-signal drawdown backstop.
 
-        Gate: vol_21d > P50 (above median vol = expanding from squeeze)
+        Gate: vol_21d > P60 (above-median vol = expanding from squeeze)
+              AND signal direction agrees with MACD-line sign
+              AND signal's own simulated drawdown < 20% (resettable)
+
+        PREVIOUSLY: single-condition gate, same structural gap as
+        macd_filter before this fix. Now requires trend confirmation in
+        addition to elevated vol, closing the asymmetry with the
+        mean-reversion gates.
         """
         return RegimeFilter(
             signal_col=signal_col,
@@ -651,6 +893,11 @@ class RegimeFilterPresets:
                     percentile=100 - vol_percentile,
                     mode="above"
                 ),
+                TrendConfirmationCondition(
+                    signal_col=signal_col, macd_col="macd_line",
+                    min_macd_magnitude=25.0,
+                ),
+                SignalDrawdownCondition(signal_col=signal_col, return_col="returns", max_dd=max_dd),
             ],
             logic="AND",
             output_col=f"{signal_col}_breakout_gated",

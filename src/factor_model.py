@@ -379,13 +379,31 @@ class OLSRegressor:
         Returns:
             FactorRegression with all statistics
         """
-        # Strip timezones for intersection — factor data and strategy returns
-        # may have different tz-awareness even on the same calendar dates.
-        y_idx = y.index.tz_localize(None).normalize() if hasattr(y.index, 'tz') and y.index.tz else y.index.normalize()
-        x_idx = X.index.tz_localize(None).normalize() if hasattr(X.index, 'tz') and X.index.tz else X.index.normalize()
+        # Defensive tz-stripping: callers should pass tz-naive, normalized
+        # indices (FactorModel.run() guarantees this), but this method may
+        # also be called directly. If either index is tz-aware, strip the
+        # timezone (not just normalize time-of-day) so the two indices are
+        # genuinely comparable as calendar dates.
+        #
+        # CRITICAL: the previous implementation computed a tz-naive
+        # `common` index via y_idx/x_idx but then reindexed the ORIGINAL
+        # (still tz-aware) y/X against it. Reindexing a tz-aware Series/
+        # DataFrame with a tz-naive index matches nothing — every row
+        # becomes NaN, .dropna() wipes the frame, and the regression
+        # silently reports "0 observations" even when the underlying
+        # dates fully overlap. The fix: replace the index on COPIES of y
+        # and X themselves before reindexing, so reindex always operates
+        # on two tz-naive indices of the same type.
+        y = y.copy()
+        X = X.copy()
+        if y.index.tz is not None:
+            y.index = y.index.tz_localize(None)
+        y.index = y.index.normalize()
+        if X.index.tz is not None:
+            X.index = X.index.tz_localize(None)
+        X.index = X.index.normalize()
 
-        # Use reindex to align both to the intersection
-        common = y_idx.intersection(x_idx)
+        common = y.index.intersection(X.index)
         if len(common) < 30:
             logger.warning(
                 f"Only {len(common)} common observations for {signal_col} — "
@@ -393,17 +411,18 @@ class OLSRegressor:
                 f"common: {len(common)}. Check timezone alignment."
             )
 
-        y_tz_naive = y.copy()
-        y_tz_naive.index = y_idx
-        y_aligned = y_tz_naive.reindex(common).dropna()
+        y_aligned = y.reindex(common).dropna()
         X_aligned = X.reindex(common).dropna()
-        # Re-align after dropna
+        # Re-align after dropna (NaNs in either series can desync the index)
         common_valid = y_aligned.index.intersection(X_aligned.index)
         y_aligned = y_aligned.loc[common_valid]
         X_aligned = X_aligned.loc[common_valid]
 
         n = len(y_aligned)
         k = X_aligned.shape[1]
+
+        logger.info(f"OLS fit: signal={signal_col}, model={model_name}, n={n}, y_mean={y_aligned.mean():.6f}" if n > 0 else
+                    f"OLS fit: signal={signal_col}, model={model_name}, n=0 — no overlapping dates")
 
         if n < 30:
             return self._empty_regression(signal_col, model_name, X_aligned.columns)
@@ -587,6 +606,23 @@ class FactorModel:
             rf_annual=self.rf_annual,
         )
 
+        # Normalize factor_df index to tz-naive calendar dates for reliable
+        # alignment. Strategy returns (daily_returns) come from the
+        # backtester, whose index inherits the cleaning pipeline's
+        # configured timezone (e.g. "US/Eastern") — while this factor_df
+        # is built from raw yfinance/Ken-French data in UTC. .normalize()
+        # alone only zeroes the time-of-day component and does NOT strip
+        # timezone, so a UTC index and a US/Eastern index normalize to
+        # different tz-aware indices that never intersect even on
+        # identical calendar dates. We must explicitly drop tz-awareness
+        # (tz_localize(None)) in addition to normalizing, on BOTH sides,
+        # so every downstream .reindex()/.intersection() call operates on
+        # genuinely comparable tz-naive calendar-date indices.
+        factor_df = factor_df.copy()
+        if factor_df.index.tz is not None:
+            factor_df.index = factor_df.index.tz_localize(None)
+        factor_df.index = factor_df.index.normalize()
+
         logger.info(
             f"{tag}Factor data loaded: {len(factor_df)} observations, "
             f"factors: {[c for c in factor_df.columns if c != 'RF']}"
@@ -603,14 +639,16 @@ class FactorModel:
         for sig_col, ret_series in daily_returns.items():
             logger.info(f"{tag}Attributing {sig_col}...")
 
-            # Excess returns: strategy - rf
-            # Strip timezone BEFORE reindex to avoid tz mismatch
-            if hasattr(ret_series.index, 'tz') and ret_series.index.tz:
-                ret_series = ret_series.copy()
-                ret_series.index = ret_series.index.tz_localize(None)
+            # Strip timezone (not just normalize time-of-day) so this
+            # index is genuinely comparable to factor_df's tz-naive index.
+            ret_norm = ret_series.copy()
+            ret_idx = ret_series.index
+            if ret_idx.tz is not None:
+                ret_idx = ret_idx.tz_localize(None)
+            ret_norm.index = ret_idx.normalize()
 
-            rf_aligned = factor_df["RF"].reindex(ret_series.index).fillna(self.rf_daily)
-            excess = ret_series - rf_aligned
+            rf_aligned = factor_df["RF"].reindex(ret_norm.index).fillna(self.rf_daily)
+            excess = ret_norm - rf_aligned
 
             regs = []
             for model_name, factor_cols in models.items():

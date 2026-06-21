@@ -212,6 +212,66 @@ class TestHMMRegimeDetector:
         hmm.fit(df)
         assert hmm._is_fitted
 
+    def test_three_state_labels_are_semantic(self, df):
+        """
+        Regression test: n_states=3 (the value config.yaml actually
+        requests in production) must produce semantic regime names
+        (range_bound, crisis, and one of trending_up/trending_down) — not
+        the generic 'state_N_vol_rank' fallback. The generic names never
+        match AdaptiveSignalSwitch's registered favourable-regime names,
+        so every signal silently receives zero weight in every regime and
+        signal_adaptive is permanently flat. This is the deeper bug that
+        was masking the apply()/apply_discrete() discretization issue:
+        with n_states=3 mislabeled, the choice between continuous and
+        discrete weighting was irrelevant because the weight was always
+        zero either way.
+        """
+        hmm = HMMRegimeDetector(n_states=3, n_iter=30, random_state=5)
+        hmm.fit(df)
+        labels_used = set(hmm._state_labels.values())
+
+        assert "range_bound" in labels_used, (
+            f"n_states=3 must label one state 'range_bound', got {labels_used}"
+        )
+        assert "crisis" in labels_used, (
+            f"n_states=3 must label one state 'crisis', got {labels_used}"
+        )
+        assert ("trending_up" in labels_used) or ("trending_down" in labels_used), (
+            f"n_states=3 must label one state as a trending direction, "
+            f"got {labels_used}"
+        )
+        # No generic fallback names should appear when n_states == 3
+        generic = {l for l in labels_used if l.startswith("state_")}
+        assert not generic, (
+            f"n_states=3 should not fall back to generic labels, found {generic}"
+        )
+
+    def test_three_state_probabilities_match_adaptive_switch_registry(self, df):
+        """
+        End-to-end regression test: with n_states=3, AdaptiveSignalSwitch
+        registered against the standard regime names (as pipeline.py
+        does) must receive non-zero weight on a real fit — confirming the
+        semantic labels actually reach and are usable by downstream
+        consumers, not just present in isolation.
+        """
+        from regime_detector import AdaptiveSignalSwitch
+
+        hmm = HMMRegimeDetector(n_states=3, n_iter=30, random_state=5)
+        hmm.fit(df)
+        result = hmm.predict(df, online=False)  # smoothed is fine for this check
+
+        switch = AdaptiveSignalSwitch()
+        switch.register("signal_rsi",   favourable=["range_bound"])
+        switch.register("signal_zscore", favourable=["range_bound"])
+        switch.register("signal_macd",  favourable=["trending_up", "trending_down"])
+        switch.register("signal_bb",    favourable=["trending_up", "trending_down"])
+
+        continuous = switch.apply(df, result.probabilities, normalise=True).fillna(0.0)
+        assert (continuous != 0).any(), (
+            "AdaptiveSignalSwitch produced all-zero weights with n_states=3 — "
+            "regime labels are not reaching the registered favourable-regime names."
+        )
+
     def test_predict_before_fit_raises(self, df):
         hmm = HMMRegimeDetector(n_states=3)
         with pytest.raises(RuntimeError, match="not fitted"):

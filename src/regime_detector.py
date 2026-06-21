@@ -435,8 +435,39 @@ class HMMRegimeDetector:
             for s in range(self.n_states):
                 labels.setdefault(s, f"state_{s}")
             return labels
+
+        elif self.n_states == 3:
+            # Collapsed 3-regime labelling: range_bound / trending / crisis.
+            # The single "trending" state is tagged trending_up or
+            # trending_down based on its own empirical mean return, so
+            # callers that register signals against both trend directions
+            # (the standard pattern — see AdaptiveSignalSwitch registrations
+            # in pipeline.py) still receive weight whenever the market is
+            # trending, regardless of which direction this particular fit
+            # happened to land on.
+            by_vol = sorted(state_stats.items(), key=lambda kv: kv[1]["mean_vol"])
+            crisis_state = by_vol[-1][0]             # highest vol
+            range_state  = by_vol[0][0]               # lowest vol
+            remaining    = [s for s, _ in by_vol if s not in (crisis_state, range_state)]
+            trend_state  = remaining[0] if remaining else by_vol[len(by_vol) // 2][0]
+
+            trend_direction = (
+                "trending_up"
+                if state_stats[trend_state]["mean_ret"] >= 0
+                else "trending_down"
+            )
+
+            labels = {
+                crisis_state: "crisis",
+                range_state:  "range_bound",
+                trend_state:  trend_direction,
+            }
+            for s in range(self.n_states):
+                labels.setdefault(s, f"state_{s}")
+            return labels
+
         else:
-            # Generic labelling for non-4 state counts
+            # Generic labelling for non-3/4 state counts
             by_vol = sorted(state_stats.items(), key=lambda kv: kv[1]["mean_vol"])
             return {s: f"state_{i}_vol_rank" for i, (s, _) in enumerate(by_vol)}
 

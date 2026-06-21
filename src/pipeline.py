@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import pandas as pd
+import numpy as np
 import yaml
 
 from data_fetcher import MarketDataFetcher
@@ -24,6 +25,7 @@ from signal_generator import SignalGenerator
 from backtester import VectorisedBacktester, TransactionCostModel
 from factor_model import FactorModel, RegimeAnalyser
 from regime_filter import RegimeFilteredEnsemble, RegimeFilterPresets
+from ml_signal import MLSignalGenerator, WalkForwardSplitter
 from regime_detector import (
     RuleBasedClassifier,
     HMMRegimeDetector,
@@ -104,6 +106,22 @@ class MarketDataPipeline:
             "max_trend_annual": 0.10,
             "bb_percentile":   40.0,
         },
+        "ml_signal": {
+            "enabled":          False,   # opt-in: walk-forward fitting is the
+                                          # slowest stage in the pipeline and
+                                          # the newest, so it defaults off
+                                          # rather than silently lengthening
+                                          # every run.
+            "model_type":       "xgboost",   # "xgboost" | "random_forest"
+            "deadband":         0.005,
+            "target_col":       "returns_fwd_5",
+            "n_folds":          5,
+            "min_train_bars":   252,
+            "test_bars":        63,
+            "expanding":        True,
+            "train_window_bars": 504,    # only used when expanding=False
+            "embargo_bars":     5,       # must be >= the forward-return horizon
+        },
         "regime": {
             "enabled":          True,
             "method":           "rule_based",
@@ -127,7 +145,7 @@ class MarketDataPipeline:
                 loaded = yaml.safe_load(fh) or {}
             merged = dict(self.DEFAULTS)
             for k, v in loaded.items():
-                if k in ("features", "signals", "backtest", "factor", "regime_filter", "regime"):
+                if k in ("features", "signals", "backtest", "factor", "regime_filter", "ml_signal", "regime"):
                     merged[k] = {**self.DEFAULTS.get(k, {}), **v}
                 else:
                     merged[k] = v
@@ -167,6 +185,20 @@ class MarketDataPipeline:
         )
         self.regime_analyser = RegimeAnalyser()
         self.regime_filter_ensemble = RegimeFilteredEnsemble()
+
+        ml_cfg = self.config["ml_signal"]
+        self.ml_generator = MLSignalGenerator(
+            model_type=ml_cfg["model_type"],
+            deadband=ml_cfg["deadband"],
+        )
+        self.ml_splitter = WalkForwardSplitter(
+            n_folds=ml_cfg["n_folds"],
+            min_train_bars=ml_cfg["min_train_bars"],
+            test_bars=ml_cfg["test_bars"],
+            expanding=ml_cfg["expanding"],
+            train_window_bars=ml_cfg["train_window_bars"],
+            embargo_bars=ml_cfg["embargo_bars"],
+        )
 
         # Regime detection (Phase 7)
         self.rule_detector = RuleBasedClassifier()
@@ -273,6 +305,66 @@ class MarketDataPipeline:
                     ensemble_method=sig_cfg["ensemble"]["method"],
                 )
 
+                # Stage 4c: Regime-gated signal filtering (Phase 6a)
+                #
+                # PREVIOUSLY MISSING: self.regime_filter_ensemble was
+                # instantiated in __init__ but never called anywhere in
+                # run(). Every signal — including signal_ensemble — reached
+                # the backtester completely unfiltered, taking full-size
+                # fixed_notional positions even in regimes where that exact
+                # signal family is known (from the Phase 5 regime analysis)
+                # to lose money. This is the direct cause of the -62% to
+                # -89% drawdowns: not a position-sizing bug, but the total
+                # absence of any regime gate upstream of position sizing.
+                #
+                # Wiring this in adds the regime-gated columns
+                # (signal_rsi_vol_trend_gated, signal_zscore_vol_bb_gated,
+                # signal_macd_trend_gated, signal_bb_breakout_gated,
+                # signal_mr_pool, signal_trend_pool, signal_regime_adaptive)
+                # so they are backtested alongside the raw, ungated signals
+                # — giving an honest side-by-side comparison instead of
+                # silently discarding the Phase 6a work.
+                rf_cfg = self.config["regime_filter"]
+                if rf_cfg.get("enabled", True):
+                    df_signals = self.regime_filter_ensemble.apply(df_signals)
+                    logger.info(
+                        f"[{symbol}] Regime-gated signals added "
+                        f"(signal_regime_adaptive, *_gated columns)."
+                    )
+
+                # Stage 4d: ML signal (Phase 7) — walk-forward validated
+                #
+                # Disabled by default (ml_signal.enabled=False) since this
+                # is the slowest stage in the pipeline (re-fits a fresh
+                # model per fold) and the newest, least battle-tested one.
+                # When enabled, produces signal_ml alongside every
+                # rule-based signal, flowing through the SAME backtester,
+                # gating comparison, and factor attribution as everything
+                # else — that reuse is the entire point: this signal is
+                # only trustworthy because that validation machinery
+                # already existed and was tested before this stage was
+                # written.
+                ml_cfg = self.config["ml_signal"]
+                if ml_cfg.get("enabled", False):
+                    try:
+                        ml_result = self.ml_generator.fit_predict_walk_forward(
+                            df_signals,
+                            splitter=self.ml_splitter,
+                            target_col=ml_cfg["target_col"],
+                            ticker=symbol,
+                        )
+                        df_signals["signal_ml"] = ml_result.signal
+                        self._save_ml_reports(
+                            ml_result, symbol,
+                            target=df_signals[ml_cfg["target_col"]],
+                        )
+                        logger.info(f"[{symbol}] {ml_result.summary()}")
+                    except Exception as exc:
+                        logger.error(
+                            f"[{symbol}] ML signal generation failed: {exc}",
+                            exc_info=True,
+                        )
+
                 # Stage 4b: Regime detection (Phase 7)
                 if self.config.get("regime", {}).get("enabled", False):
                     if self.config["regime"]["method"] == "hmm":
@@ -289,10 +381,40 @@ class MarketDataPipeline:
                         df_signals[f"regime_prob_{col}"] = result.probabilities[col]
 
                     # Adaptive switching
+                    #
+                    # PREVIOUSLY: apply_discrete(threshold=0.0) collapsed the
+                    # continuous regime-confidence-weighted blend to a hard
+                    # {-1,0,+1} via sign(), discarding exactly the
+                    # calibration information HMM probabilities exist to
+                    # provide. A blend of +0.51 (barely-favoured long) and
+                    # +0.99 (overwhelmingly-favoured long) both produced an
+                    # identical full-size +1 position.
+                    #
+                    # NOW: apply() returns the continuous weighted value in
+                    # [-1, +1] directly. Its sign gives the discrete
+                    # direction (still required by the signal_* scanning
+                    # logic in Stage 5 below, and by Trade-extraction logic
+                    # in the backtester which expects {-1,0,+1}). Its
+                    # absolute magnitude becomes position_scale_adaptive,
+                    # consumed by VectorisedBacktester's existing scale_col
+                    # mechanism — so a 51/49 regime split now produces a
+                    # small position, and a 99/1 split produces a full-size
+                    # one, instead of both being identical.
                     if self.config["regime"].get("adaptive_enabled", True):
-                        df_signals["signal_adaptive"] = self.adaptive_switch.apply_discrete(
-                            df_signals, result.probabilities, threshold=0.0
-                        )
+                        continuous = self.adaptive_switch.apply(
+                            df_signals, result.probabilities, normalise=True
+                        ).fillna(0.0)
+                        # fillna(0.0) above is required: result.probabilities
+                        # legitimately contains NaN during the regime
+                        # detector's warmup period (insufficient history for
+                        # HMM/rule-based classification). np.sign(NaN) is
+                        # NaN, and .astype(int) on a NaN-containing float
+                        # Series raises IntCastingNaNError — without this
+                        # fillna, the pipeline would crash on every run that
+                        # includes a warmup period (i.e. every run).
+                        df_signals["signal_adaptive"] = np.sign(continuous).astype(int)
+                        df_signals["position_scale_adaptive"] = continuous.abs().clip(0.0, 1.0)
+
                     logger.info(
                         f"[{symbol}] Regime detection complete "
                         f"({result.method})."
@@ -306,8 +428,20 @@ class MarketDataPipeline:
                 ]
                 for sig_col in signal_cols:
                     try:
+                        # signal_adaptive must use its OWN confidence-derived
+                        # scale column, not the generic position_scale (which
+                        # is computed from vol percentile and has no
+                        # knowledge of regime confidence). Every other
+                        # signal continues to use the default scale_col.
+                        scale_col = (
+                            "position_scale_adaptive"
+                            if sig_col == "signal_adaptive"
+                            and "position_scale_adaptive" in df_signals.columns
+                            else "position_scale"
+                        )
                         bt = self.backtester.run(
-                            df_signals, signal_col=sig_col, ticker=symbol
+                            df_signals, signal_col=sig_col, scale_col=scale_col,
+                            ticker=symbol,
                         )
                         bt_results_map[sig_col] = bt
                     except Exception as e:
@@ -320,9 +454,22 @@ class MarketDataPipeline:
                     ).T.sort_values("sharpe", ascending=False)
                     self._save_backtest(comparison, symbol)
                     backtest_results[symbol] = bt_results_map
-                    daily_returns_all[symbol] = {
-                        sig: res.daily_returns for sig, res in bt_results_map.items()
-                    }
+
+                    # Gated-vs-naive comparison — the number this phase exists
+                    # to produce. Pairs each base signal with its regime-gated
+                    # counterpart and computes the delta directly, instead of
+                    # leaving it as an exercise to diff two rows of the
+                    # standard comparison table by hand.
+                    self._save_gating_comparison(comparison, symbol)
+                    # Filter to active trading days for factor attribution
+                    filtered_returns = {}
+                    for sig, res in bt_results_map.items():
+                        active_mask = res.positions != 0
+                        if active_mask.sum() > 30:
+                            filtered_returns[sig] = res.daily_returns[active_mask]
+                        else:
+                            filtered_returns[sig] = res.daily_returns
+                    daily_returns_all[symbol] = filtered_returns
 
                 # Stage 8: Persist processed data + quality reports
                 self._save(df_signals, symbol)
@@ -462,10 +609,200 @@ class MarketDataPipeline:
 
         logger.info(f"[{symbol}] Quality reports saved.")
 
+    def _save_ml_reports(self, ml_result, symbol: str, target: pd.Series) -> None:
+        """
+        Persist the walk-forward fold report, aggregated feature
+        importance, and an explicit deadband threshold sweep for the ML
+        signal — these are the artefacts that make the ML signal
+        auditable rather than a black box: which folds actually had
+        predictive power (test_ic, direction_acc), which features the
+        model relied on, and how trade frequency / direction accuracy
+        trade off against the deadband threshold (reported separately
+        from backtest Sharpe by design — see threshold_sweep()'s
+        docstring for why).
+        """
+        fold_out = self._data_dir / "results" / f"{symbol}_ml_fold_report.csv"
+        ml_result.fold_report().to_csv(fold_out)
+
+        importance_out = self._data_dir / "results" / f"{symbol}_ml_importance.csv"
+        ml_result.importance_report(top_n=30).to_csv(importance_out)
+
+        sweep_out = self._data_dir / "results" / f"{symbol}_ml_threshold_sweep.csv"
+        sweep = self.ml_generator.threshold_sweep(ml_result.predictions, target)
+        sweep.to_csv(sweep_out)
+
+        logger.info(
+            f"[{symbol}] ML reports → {fold_out.name}, {importance_out.name}, "
+            f"{sweep_out.name}"
+        )
+
     def _save_backtest(self, comparison: pd.DataFrame, symbol: str) -> None:
         out = self._data_dir / "results" / f"{symbol}_backtest.csv"
         comparison.round(4).to_csv(out)
         logger.info(f"[{symbol}] Backtest results → {out}")
+
+    # Base signal -> its regime-gated counterpart column name. Centralised
+    # here so the mapping has one source of truth; RegimeFilterPresets
+    # determines the actual *_gated/*_pool column names produced.
+    _GATING_PAIRS = {
+        "signal_rsi":    "signal_rsi_vol_trend_gated",
+        "signal_zscore": "signal_zscore_vol_bb_gated",
+        "signal_macd":   "signal_macd_trend_gated",
+        "signal_bb":     "signal_bb_breakout_gated",
+        "signal_ensemble": "signal_regime_adaptive",
+    }
+
+    def _save_gating_comparison(
+        self,
+        comparison: pd.DataFrame,
+        symbol: str,
+    ) -> Optional[pd.DataFrame]:
+        """
+        Build and save the gated-vs-naive comparison: for every base signal
+        that has a known regime-gated counterpart, report the Sharpe and
+        max-drawdown delta directly, plus an explicit verdict.
+
+        This is the single number Phase 8 exists to produce. Without it,
+        "did regime-gating help" required manually finding two rows in
+        {symbol}_backtest.csv and subtracting them by eye.
+
+        Verdict logic:
+            "gating_hurt"                       — gated drawdown got WORSE
+                                                   than naive by >2pp. The
+                                                   gate is actively
+                                                   counterproductive here.
+            "gating_helped"                     — gated drawdown improved
+                                                   by >2pp AND Sharpe did
+                                                   not get meaningfully
+                                                   worse. Only evaluated
+                                                   when gated_n_trades is
+                                                   high enough for Sharpe
+                                                   to be a trustworthy
+                                                   statistic.
+            "gating_helped_but_sharpe_cost"     — drawdown improved but
+                                                   Sharpe dropped more than
+                                                   the allowed tolerance,
+                                                   at a trade count where
+                                                   that Sharpe number is
+                                                   still meaningful.
+            "gating_helped_low_sample"          — drawdown AND total
+                                                   return both improved,
+                                                   but gated_n_trades is
+                                                   below the threshold
+                                                   where Sharpe (computed
+                                                   on daily returns,
+                                                   annualised) is a
+                                                   trustworthy statistic.
+                                                   A 2-trade signal can
+                                                   show Sharpe=-5.4 purely
+                                                   from sample-size noise
+                                                   even while its absolute
+                                                   loss shrank 10x — this
+                                                   label says "trust the
+                                                   drawdown/return numbers
+                                                   here, not the Sharpe
+                                                   delta."
+            "gating_helped_dd_only_low_sample"  — drawdown improved but
+                                                   total return did not,
+                                                   at low sample size.
+            "inconclusive" / "inconclusive_low_sample" — neither condition
+                                                   clearly met.
+
+        Returns:
+            The comparison DataFrame, or None if no pairs were available
+            (e.g. regime filtering was disabled for this run).
+        """
+        rows = []
+        for base_col, gated_col in self._GATING_PAIRS.items():
+            if base_col not in comparison.index or gated_col not in comparison.index:
+                continue
+
+            base  = comparison.loc[base_col]
+            gated = comparison.loc[gated_col]
+
+            sharpe_delta = float(gated["sharpe"] - base["sharpe"])
+            dd_delta     = float(gated["max_drawdown"] - base["max_drawdown"])  # both negative; less negative = improvement
+            return_delta = float(gated["total_return"] - base["total_return"])
+            gated_trades = int(gated["n_trades"])
+            trade_reduction_pct = (
+                float(1 - gated["n_trades"] / base["n_trades"]) * 100
+                if base["n_trades"] > 0 else 0.0
+            )
+
+            dd_improved = dd_delta > 0.02          # gated DD at least 2pp shallower
+            dd_worsened = dd_delta < -0.02          # gated DD at least 2pp deeper
+
+            # Sharpe is computed on daily returns and annualised — at very
+            # low trade counts (a near-empty return stream with only a
+            # handful of non-zero days) it is dominated by noise and is
+            # NOT a trustworthy statistic, regardless of its sign or
+            # magnitude. A gated signal can show Sharpe=-5.4 on 2 trades
+            # while its absolute loss shrank 10x versus the ungated
+            # version — the Sharpe number in that case is an artifact of
+            # sample size, not a real risk-adjusted-return tradeoff.
+            # Below this threshold, judge the gate on drawdown and total
+            # return alone, and say so explicitly rather than reporting a
+            # misleading Sharpe comparison as if it were meaningful.
+            min_trades_for_sharpe = 15
+            low_sample_size = gated_trades < min_trades_for_sharpe
+
+            if dd_worsened:
+                verdict = "gating_hurt"
+            elif low_sample_size:
+                if dd_improved and return_delta > -0.02:
+                    verdict = "gating_helped_low_sample"
+                elif dd_improved:
+                    verdict = "gating_helped_dd_only_low_sample"
+                else:
+                    verdict = "inconclusive_low_sample"
+            else:
+                sharpe_acceptable = sharpe_delta > -0.5  # allow modest Sharpe cost for safety
+                if dd_improved and sharpe_acceptable:
+                    verdict = "gating_helped"
+                elif dd_improved:
+                    verdict = "gating_helped_but_sharpe_cost"
+                else:
+                    verdict = "inconclusive"
+
+            rows.append({
+                "base_signal":           base_col,
+                "gated_signal":          gated_col,
+                "base_sharpe":           round(float(base["sharpe"]), 4),
+                "gated_sharpe":          round(float(gated["sharpe"]), 4),
+                "sharpe_delta":          round(sharpe_delta, 4),
+                "base_max_drawdown":     round(float(base["max_drawdown"]), 4),
+                "gated_max_drawdown":    round(float(gated["max_drawdown"]), 4),
+                "max_drawdown_delta":    round(dd_delta, 4),
+                "base_total_return":     round(float(base["total_return"]), 4),
+                "gated_total_return":    round(float(gated["total_return"]), 4),
+                "base_n_trades":         int(base["n_trades"]),
+                "gated_n_trades":        gated_trades,
+                "trade_reduction_pct":   round(trade_reduction_pct, 1),
+                "low_sample_size":       low_sample_size,
+                "verdict":               verdict,
+            })
+
+        if not rows:
+            logger.info(
+                f"[{symbol}] No gated/base signal pairs available — "
+                f"skipping gating comparison report."
+            )
+            return None
+
+        result = pd.DataFrame(rows).set_index("base_signal")
+        out = self._data_dir / "results" / f"{symbol}_gating_comparison.csv"
+        result.to_csv(out)
+        logger.info(f"[{symbol}] Gating comparison → {out}")
+
+        for base_col, row in result.iterrows():
+            logger.info(
+                f"[{symbol}] {base_col:18s} -> {row['gated_signal']:28s} "
+                f"DD {row['base_max_drawdown']:+.1%} -> {row['gated_max_drawdown']:+.1%}  "
+                f"Sharpe {row['base_sharpe']:+.2f} -> {row['gated_sharpe']:+.2f}  "
+                f"[{row['verdict']}]"
+            )
+
+        return result
 
     def _save_watchlist_comparison(
         self,
@@ -614,11 +951,25 @@ if __name__ == "__main__":
         else:
             alpha_str = "  CAPM_alpha=N/A"
 
+        gating_str = ""
+        gc_path = pipeline._data_dir / "results" / f"{ticker}_gating_comparison.csv"
+        if gc_path.exists():
+            try:
+                gc_df = pd.read_csv(gc_path, index_col=0)
+                if "signal_ensemble" in gc_df.index:
+                    row = gc_df.loc["signal_ensemble"]
+                    gating_str = (
+                        f"  gating[{row['verdict']}]"
+                        f" DD={row['base_max_drawdown']:+.1%}->{row['gated_max_drawdown']:+.1%}"
+                    )
+            except Exception:
+                pass
+
         print(
             f"  {ticker:6s}  rows={len(df):5d}  "
             f"features={len(feat_cols):2d}  "
             f"signals={len(sig_cols):2d}"
-            f"{sharpe_str}{adaptive_str}{alpha_str}"
+            f"{sharpe_str}{adaptive_str}{alpha_str}{gating_str}"
         )
 
     print(f"\nOutputs in: {pipeline._data_dir}/")
