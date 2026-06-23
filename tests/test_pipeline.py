@@ -3,7 +3,6 @@ tests/test_pipeline.py — Basic validation tests for the market data pipeline.
 """
 import sys
 from pathlib import Path
-from unittest import result
 import pandas as pd
 import numpy as np
 import pytest
