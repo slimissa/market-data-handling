@@ -112,6 +112,15 @@ class MarketDataFetcher:
             df.index.name = "datetime"
             # Normalise column names immediately
             df.columns = [c.lower().replace(" ", "_") for c in df.columns]
+            # Normalise to UTC — yfinance may return America/New_York or
+            # tz-naive depending on version and interval. Downstream modules
+            # (factor_model, data_cleaner) all expect a consistent tz-aware
+            # UTC index; without this, the same pipeline run can produce
+            # different tz on live-fetch vs cache-read paths.
+            if df.index.tz is None:
+                df.index = df.index.tz_localize("UTC")
+            else:
+                df.index = df.index.tz_convert("UTC")
             logger.info(f"[{symbol}] Fetched {len(df)} rows ({interval}).")
             return df
 
@@ -123,6 +132,16 @@ class MarketDataFetcher:
         df = pd.read_csv(path, index_col=0, parse_dates=True)
         df.index.name = "datetime"
         df.columns = [c.lower().replace(" ", "_") for c in df.columns]
+        # Restore UTC tz — CSV serialization strips timezone info.
+        # Without this, cache-read and live-fetch paths produce different
+        # index types (tz-naive vs tz-aware) causing silent misalignment
+        # downstream (same class of bug as the factor-model OLS regression
+        # that reported 0 observations because US/Eastern != UTC).
+        if isinstance(df.index, pd.DatetimeIndex):
+            if df.index.tz is None:
+                df.index = df.index.tz_localize("UTC")
+            else:
+                df.index = df.index.tz_convert("UTC")
         logger.info(f"Loaded {len(df)} rows from {path.name}.")
         return df
 
