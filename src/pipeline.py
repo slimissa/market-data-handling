@@ -184,7 +184,12 @@ class MarketDataPipeline:
             cache_dir=f_cfg["cache_dir"],
         )
         self.regime_analyser = RegimeAnalyser()
-        self.regime_filter_ensemble = RegimeFilteredEnsemble()
+        rf_init = self.config["regime_filter"]
+        self.regime_filter_ensemble = RegimeFilteredEnsemble(
+            vol_percentile_mr=rf_init.get("vol_percentile", 20.0),
+            max_trend_annual=rf_init.get("max_trend_annual", 0.06),
+            bb_percentile=rf_init.get("bb_percentile", 25.0),
+        )
 
         ml_cfg = self.config["ml_signal"]
         self.ml_generator = MLSignalGenerator(
