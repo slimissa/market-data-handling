@@ -401,6 +401,12 @@ class PerformanceEngine:
         Beta > 1: strategy amplifies market moves.
         Beta < 0: strategy is market-neutral or inverse.
         R² close to 1: strategy returns are largely explained by market beta.
+
+        Point estimates only — no standard errors, t-statistics, or p-values.
+        This is a fast OLS fit using numpy, not statsmodels. For significance
+        testing (is this alpha statistically distinguishable from zero?), use
+        factor_model.OLSRegressor, which applies Newey-West HAC standard errors
+        appropriate for autocorrelated financial time series.
         """
         common = strategy_ret.index.intersection(benchmark_ret.index)
         if len(common) < 30:
@@ -741,7 +747,17 @@ class VectorisedBacktester:
                 entry_shares = sh
 
             elif in_trade and (pos == 0 or pos != entry_dir):
-                # Exit or reversal
+                # Exit or reversal.
+                # On a reversal bar: `c` is the total cost for the entire
+                # share delta at this bar (close old position + open new
+                # position in one execution). Previously this was charged
+                # to BOTH exit_cost of the closing trade AND entry_cost of
+                # the new opening trade — genuine double-counting that
+                # inflated reported transaction costs for every reversal.
+                # Fix: assign the full `c` to the closing trade's exit_cost
+                # (correct — it covers the delta notional for both legs),
+                # and set the new trade's entry_cost to 0.0 (the cost was
+                # already fully accounted for in the closing leg's cost).
                 trades.append(Trade(
                     entry_date=entry_date,
                     exit_date=date,
@@ -754,13 +770,14 @@ class VectorisedBacktester:
                     signal_col=signal_col,
                 ))
 
-                # If reversal, open new trade immediately
+                # If reversal, open new trade immediately with entry_cost=0
+                # (cost already charged to the closing trade above).
                 if pos != 0:
                     in_trade    = True
                     entry_date  = date
                     entry_price = p
                     entry_dir   = pos
-                    entry_cost  = c
+                    entry_cost  = 0.0
                     entry_shares = abs(float(shares.iloc[i]))
                 else:
                     in_trade = False
@@ -811,6 +828,17 @@ class EventDrivenBacktester:
         - Applies slippage on the actual fill price, not close
         - Tracks unrealised P&L separately from realised P&L
         - Supports partial fill simulation (future extension)
+
+    Cash model — flat position behavior:
+        When the strategy is flat (no position held), cash does NOT earn
+        the risk-free rate. The equity curve is genuinely flat on non-trade
+        days. This is intentional: the Sharpe ratio correctly treats
+        opportunity cost of uninvested cash as a drag, which is the
+        honest representation for a strategy that is explicitly out of
+        the market. If you want cash to compound, apply a risk-free
+        return to the equity curve in post-processing; do not modify the
+        backtester's equity series directly, as that would conflate
+        trading-edge with carry.
 
     Use after vectorised backtester confirms a signal is worth testing.
     """
