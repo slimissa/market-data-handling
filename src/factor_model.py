@@ -271,11 +271,32 @@ class FactorDataLoader:
         factors: List[str],
         rf_daily: float,
     ) -> pd.DataFrame:
-        """Build factor proxies from ETF return spreads."""
+        """
+        Build factor proxies from ETF return spreads.
+
+        Results are cached to a parquet file keyed by date range so that
+        a 5-ticker watchlist run only hits Yahoo Finance once instead of
+        five times for the same SPY/IWM/IWD/IWF/MTUM data.
+        """
         try:
             import yfinance as yf
         except ImportError:
             raise ImportError("yfinance required for ETF factor proxies.")
+
+        # Cache key encodes the exact date range and factor set requested
+        factors_key = "_".join(sorted(factors))
+        cache_path = (
+            Path(self.cache_dir) / f"etf_proxies_{start_date}_{end_date}_{factors_key}.parquet"
+        )
+        Path(self.cache_dir).mkdir(parents=True, exist_ok=True)
+
+        if cache_path.exists():
+            try:
+                factor_df = pd.read_parquet(cache_path)
+                logger.info(f"ETF proxies loaded from cache: {cache_path.name}")
+                return factor_df
+            except Exception as exc:
+                logger.warning(f"Cache read failed ({exc}), re-downloading.")
 
         # Collect all unique tickers needed
         tickers_needed = set()
@@ -334,6 +355,14 @@ class FactorDataLoader:
             f"Built {len(factor_df.columns)-1} factor proxies: "
             f"{[c for c in factor_df.columns if c != 'RF']}"
         )
+
+        # Write to cache for subsequent tickers in the same watchlist run
+        try:
+            factor_df.to_parquet(cache_path)
+            logger.info(f"ETF proxies cached → {cache_path.name}")
+        except Exception as exc:
+            logger.warning(f"Cache write failed (non-fatal): {exc}")
+
         return factor_df
 
 
@@ -425,6 +454,20 @@ class OLSRegressor:
                     f"OLS fit: signal={signal_col}, model={model_name}, n=0 — no overlapping dates")
 
         if n < 30:
+            return self._empty_regression(signal_col, model_name, X_aligned.columns)
+
+        # Near-zero-variance guard: a constant or near-constant strategy
+        # return series (e.g. a signal that was always flat, or had
+        # exactly one trade) produces a numerically degenerate regression.
+        # Statsmodels may return NaN coefficients or raise; numpy lstsq
+        # returns 0 silently but the result is meaningless. Return empty
+        # rather than reporting fabricated zeros as if they were real.
+        if y_aligned.std() < 1e-10:
+            logger.warning(
+                f"OLS fit: signal={signal_col}, model={model_name} — "
+                f"near-zero variance in strategy returns (std={y_aligned.std():.2e}). "
+                f"Returning empty regression."
+            )
             return self._empty_regression(signal_col, model_name, X_aligned.columns)
 
         # Add constant (alpha)
@@ -853,6 +896,15 @@ class FactorModel:
         # Carhart 4-factor: FF3 + momentum
         if all(f in available_factors for f in ["MKT", "SMB", "HML", "MOM"]):
             models["Carhart4"] = ["MKT", "SMB", "HML", "MOM"]
+
+        # Intermediate models: when some but not all factors are available
+        # (e.g. one ETF proxy download failed during a run).
+        # These allow partial attribution rather than falling silent.
+        if "MKT" in available_factors and "SMB" in available_factors and "HML" not in available_factors:
+            models["FF2"] = ["MKT", "SMB"]
+
+        if "MKT" in available_factors and "MOM" in available_factors and "SMB" not in available_factors:
+            models["CAPM_MOM"] = ["MKT", "MOM"]
 
         # Fallback: single-factor with whatever is available
         if not models and available_factors:
