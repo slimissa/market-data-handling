@@ -33,6 +33,8 @@ from regime_filter import (
     BBWidthCondition,
     RSIRangeCondition,
     CompositeCondition,
+    TrendConfirmationCondition,
+    SignalDrawdownCondition,
 )
 from feature_engineering import FeatureEngineer
 from signal_generator import SignalGenerator
@@ -678,3 +680,196 @@ class TestRegimeFilteredEnsemble:
         out = rfe.apply(df)
         assert (out["signal_regime_adaptive"] != 0).any(), \
             "Regime-adaptive ensemble is always flat — check filter thresholds"
+
+# ======================================================================
+# Additional condition tests (TrendConfirmationCondition, SignalDrawdownCondition)
+# ======================================================================
+
+class TestTrendConfirmationCondition:
+
+    def test_suppresses_when_macd_disagrees_with_signal(self, df):
+        """
+        signal_macd = +1 but macd_line is negative → TrendConfirmationCondition
+        must return False, suppressing the signal.
+        """
+        df2 = df.copy()
+        # Force signal_macd long but MACD line negative everywhere
+        df2["signal_macd"] = 1
+        df2["macd_line"]   = -1.0
+
+        cond = TrendConfirmationCondition(
+            signal_col="signal_macd",
+            macd_col="macd_line",
+            min_macd_magnitude=0.0,
+        )
+        gate = cond.evaluate(df2)
+        # All bars: signal=+1 but macd<0 → disagree → gate=False
+        assert not gate.any(), (
+            "TrendConfirmationCondition should be False when signal=+1 "
+            "and macd_line<0 (direction disagreement)"
+        )
+
+    def test_passes_when_macd_agrees_with_signal(self, df):
+        """
+        signal_macd = +1 and macd_line is positive → TrendConfirmationCondition
+        must return True, passing the signal through.
+        """
+        df2 = df.copy()
+        df2["signal_macd"] = 1
+        df2["macd_line"]   = 1.0
+
+        cond = TrendConfirmationCondition(
+            signal_col="signal_macd",
+            macd_col="macd_line",
+            min_macd_magnitude=0.0,
+        )
+        gate = cond.evaluate(df2)
+        assert gate.all(), (
+            "TrendConfirmationCondition should be True when signal=+1 "
+            "and macd_line>0 (direction confirmed)"
+        )
+
+    def test_short_signal_confirmed_by_negative_macd(self, df):
+        """signal=-1, macd<0 → direction agrees → gate=True."""
+        df2 = df.copy()
+        df2["signal_macd"] = -1
+        df2["macd_line"]   = -1.0
+
+        cond = TrendConfirmationCondition(
+            signal_col="signal_macd",
+            macd_col="macd_line",
+            min_macd_magnitude=0.0,
+        )
+        gate = cond.evaluate(df2)
+        assert gate.all()
+
+    def test_flat_signal_gives_false(self, df):
+        """signal=0 never agrees with either direction → gate=False."""
+        df2 = df.copy()
+        df2["signal_macd"] = 0
+        df2["macd_line"]   = 1.0
+
+        cond = TrendConfirmationCondition(
+            signal_col="signal_macd",
+            macd_col="macd_line",
+            min_macd_magnitude=0.0,
+        )
+        gate = cond.evaluate(df2)
+        assert not gate.any()
+
+
+class TestSignalDrawdownCondition:
+
+    def test_gate_closes_during_drawdown_and_reopens_on_recovery(self, df):
+        """
+        The SignalDrawdownCondition is a RESETTABLE breaker: it fires
+        (gate=False) when the signal's simulated equity drawdown breaches
+        max_dd, then reopens (gate=True) once the equity recovers to
+        within recovery_threshold of the prior peak. This is the critical
+        property distinguishing it from the one-shot permanent breaker in
+        VectorisedBacktester.
+        """
+        import numpy as np
+        import pandas as pd
+
+        # Construct a simple DataFrame where the signal loses money
+        # sharply then recovers, without relying on the full feature set.
+        n = 200
+        idx = pd.date_range("2020-01-01", periods=n, freq="D", tz="UTC")
+        rng = np.random.default_rng(10)
+
+        # Returns: flat, then strong negative (drawdown), then strong positive (recovery)
+        rets = np.concatenate([
+            np.zeros(50),
+            -0.03 * np.ones(30),   # sustained loss phase
+            0.04  * np.ones(40),   # recovery phase
+            np.zeros(80),
+        ])
+        price = 100.0 * np.exp(np.cumsum(rets))
+
+        df2 = pd.DataFrame({
+            "open": price, "high": price*1.01, "low": price*0.99,
+            "close": price, "volume": 1e6,
+            "returns": rets,
+            "signal_test": 1,   # always long
+        }, index=idx)
+
+        cond = SignalDrawdownCondition(
+            signal_col="signal_test",
+            return_col="returns",
+            max_dd=0.10,
+            recovery_threshold=0.90,
+        )
+        gate = cond.evaluate(df2)
+
+        # During the loss phase the breaker should activate (gate=False)
+        loss_phase = gate.iloc[55:80]
+        assert not loss_phase.all(), (
+            "Gate should be False during drawdown phase"
+        )
+
+        # After sufficient recovery the breaker should have reset (gate=True)
+        recovery_phase = gate.iloc[130:160]
+        assert recovery_phase.any(), (
+            "Gate should be True again after equity recovers — "
+            "the breaker must be resettable, not permanent"
+        )
+
+    def test_gate_stays_open_when_no_drawdown(self, df):
+        """No drawdown → gate stays True for all bars."""
+        df2 = df.copy()
+        # Positive returns every bar → no drawdown possible
+        df2["returns"] = 0.001
+        df2["signal_test"] = 1
+
+        cond = SignalDrawdownCondition(
+            signal_col="signal_test",
+            return_col="returns",
+            max_dd=0.10,
+        )
+        gate = cond.evaluate(df2)
+        # After initial warmup bars, gate should be True
+        assert gate.iloc[10:].all(), (
+            "Gate should remain open when signal never experiences a drawdown"
+        )
+
+
+class TestRegimeFilteredEnsembleExtended:
+
+    def test_ensemble_range_bound_uses_mr_signals(self, df):
+        """
+        In range_bound bars, signal_regime_adaptive must equal signal_mr_pool.
+        This verifies the pool-switching logic: the ensemble routes to the
+        correct signal family based on the two-state regime label.
+        """
+        rfe = RegimeFilteredEnsemble()
+        out = rfe.apply(df)
+
+        range_mask = out["regime_label"] == "range_bound"
+        if not range_mask.any():
+            pytest.skip("No range_bound bars in this synthetic dataset")
+
+        pd.testing.assert_series_equal(
+            out.loc[range_mask, "signal_regime_adaptive"].reset_index(drop=True),
+            out.loc[range_mask, "signal_mr_pool"].reset_index(drop=True),
+            check_names=False,
+            obj="signal_regime_adaptive in range_bound regime",
+        )
+
+    def test_ensemble_trending_uses_trend_signals(self, df):
+        """
+        In trending bars, signal_regime_adaptive must equal signal_trend_pool.
+        """
+        rfe = RegimeFilteredEnsemble()
+        out = rfe.apply(df)
+
+        trend_mask = out["regime_label"] == "trending"
+        if not trend_mask.any():
+            pytest.skip("No trending bars in this synthetic dataset")
+
+        pd.testing.assert_series_equal(
+            out.loc[trend_mask, "signal_regime_adaptive"].reset_index(drop=True),
+            out.loc[trend_mask, "signal_trend_pool"].reset_index(drop=True),
+            check_names=False,
+            obj="signal_regime_adaptive in trending regime",
+        )
