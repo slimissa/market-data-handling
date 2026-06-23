@@ -489,6 +489,93 @@ class TestVectorisedBacktester:
         eq_full  = r_full.equity_curve.iloc[:200].values
         np.testing.assert_allclose(eq_short, eq_full, rtol=1e-6)
 
+    def test_max_drawdown_exit_zeros_positions(self):
+        """
+        Drawdown circuit breaker: once portfolio equity drawdown exceeds
+        max_drawdown_exit, all positions must be zero for the remainder
+        of the backtest. The breach must be permanent (one-shot).
+        """
+        df = make_trending_df(n=300)
+        # Inject a signal that is always short in an uptrending market
+        # to guarantee a drawdown breach fairly early in the run.
+        df = inject_perfect_long_signal(df)
+        df["signal_always_short"] = -1
+
+        vbt = VectorisedBacktester(
+            initial_capital=100_000,
+            cost_model=TransactionCostModel.zero(),
+            max_drawdown_exit=0.05,  # very tight: 5%
+        )
+        result = vbt.run(df, signal_col="signal_always_short")
+
+        equity = result.equity_curve
+        peak   = equity.cummax()
+        dd     = (equity - peak) / peak
+
+        # Find first breach
+        breach_mask = dd < -0.05
+        if not breach_mask.any():
+            pytest.skip("No drawdown breach occurred — increase the drawdown threshold")
+
+        first_breach = breach_mask.idxmax()
+        post_breach_positions = result.positions.loc[first_breach:]
+        assert (post_breach_positions == 0).all(), (
+            "Positions must be permanently zeroed after drawdown circuit breaker fires"
+        )
+
+    def test_scale_col_reduces_position_size(self):
+        """
+        scale_col=0.5 for all bars must produce roughly half the total
+        return of scale_col=1.0 (the default), confirming position size
+        is actually multiplied by the scale column, not ignored.
+        """
+        df = make_trending_df(n=300)
+        df = inject_perfect_long_signal(df)
+        df["position_scale"] = 1.0
+        df["position_scale_half"] = 0.5
+
+        vbt = VectorisedBacktester(
+            initial_capital=100_000,
+            cost_model=TransactionCostModel.zero(),
+        )
+        r_full = vbt.run(df, signal_col="signal_perfect_long", scale_col="position_scale")
+        r_half = vbt.run(df, signal_col="signal_perfect_long", scale_col="position_scale_half")
+
+        ret_full = float(r_full.metrics["total_return"])
+        ret_half = float(r_half.metrics["total_return"])
+
+        # Half scale should produce roughly half the return in a pure
+        # trend (no transaction costs, so ratio should be very close to 0.5)
+        assert ret_full != 0.0, "Control run should have non-zero return"
+        ratio = ret_half / ret_full
+        assert 0.4 < ratio < 0.65, (
+            f"scale_col=0.5 should give ~half the return; got ratio={ratio:.3f}. "
+            f"scale_col may not be wired through to position sizing."
+        )
+
+    def test_compare_signals_auto_discovers_columns(self):
+        """
+        compare_signals with signal_cols=None should auto-discover all
+        signal_* columns in df and return a row for each.
+        """
+        df = make_trending_df(n=200)
+        df = inject_perfect_long_signal(df)
+        df["signal_a"] = 1
+        df["signal_b"] = -1
+        df["not_a_signal_col"] = 0.5  # should not appear in results
+
+        vbt = VectorisedBacktester(initial_capital=100_000,
+                                    cost_model=TransactionCostModel.zero())
+        result = vbt.compare_signals(df, signal_cols=None)
+
+        assert isinstance(result, pd.DataFrame)
+        assert len(result) > 0
+        assert "not_a_signal_col" not in result.index
+        # Auto-discovered cols should include signal_a, signal_b, and
+        # signal_perfect_long — all valid signal_ prefixed columns
+        for col in ["signal_a", "signal_b", "signal_perfect_long"]:
+            assert col in result.index, f"{col} should have been auto-discovered"
+
 
 # ======================================================================
 # 4. EventDrivenBacktester
@@ -538,6 +625,35 @@ class TestEventDrivenBacktester:
             )
             result = bt.run(df, signal_col="signal_perfect_long")
             assert result.equity_curve.notna().all(), f"NaN equity with mode={mode}"
+
+    def test_no_lookahead_equity_event_driven(self):
+        """
+        EventDrivenBacktester: equity at bar t must not change when
+        future bars are appended — same guarantee as the vectorised
+        backtester, verified on the bar-by-bar engine.
+
+        Uses execution_price='close' and a shared underlying price series
+        so both runs receive identical fill prices — the test isolates
+        the lookahead property, not execution-price differences between
+        open/close (which legitimately differ between different-length DFs
+        since OHLC is generated independently per call to make_trending_df).
+        """
+        df_full = make_trending_df(n=300)
+        df_full = inject_perfect_long_signal(df_full)
+        df_short = df_full.iloc[:200].copy()
+
+        edb = EventDrivenBacktester(
+            initial_capital=100_000,
+            cost_model=TransactionCostModel.zero(),
+            execution_price="close",  # deterministic fill price
+        )
+        r_short = edb.run(df_short, signal_col="signal_perfect_long")
+        r_full  = edb.run(df_full,  signal_col="signal_perfect_long")
+
+        eq_short = r_short.equity_curve.values
+        eq_full  = r_full.equity_curve.iloc[:200].values
+        np.testing.assert_allclose(eq_short, eq_full, rtol=1e-6,
+            err_msg="EventDriven equity changed when future bars appended")
 
 
 # ======================================================================
