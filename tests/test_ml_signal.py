@@ -485,3 +485,47 @@ class TestMLSignalResult:
         result = ml.fit_predict_walk_forward(df, splitter=splitter)
         # At least one fold should have non-empty importances
         assert any(len(f.feature_importance) > 0 for f in result.fold_results)
+    def test_default_embargo_matches_forward_return_horizon(self):
+        """
+        WalkForwardSplitter's default embargo_bars must be >= 5 to cover
+        the returns_fwd_5 training label horizon. If embargo_bars is
+        reduced below 5, the last training row's label reads a price inside
+        the test window — a direct data leak that would silently improve
+        backtest Sharpe while producing a strategy that fails live.
+
+        This is a regression guard: it catches anyone accidentally reducing
+        the default embargo without understanding the label-horizon dependency.
+        """
+        splitter = WalkForwardSplitter()
+        assert splitter.embargo_bars >= 5, (
+            f"Default embargo_bars={splitter.embargo_bars} is less than 5. "
+            f"returns_fwd_5 labels look 5 bars forward, so an embargo of "
+            f"< 5 bars allows the last training labels to read prices inside "
+            f"the test window — a direct data leak."
+        )
+
+    def test_random_forest_handles_nan_features(self, splitter):
+        """
+        MLSignalGenerator with model_type='random_forest' must not crash
+        when a feature column is entirely NaN in a fold's training slice.
+
+        XGBoost handles NaN natively. sklearn's RandomForest does not —
+        it raises ValueError on NaN input. The double-fillna
+        (fillna(median) then fillna(0)) in _build_xy() must prevent this.
+        """
+        df = make_full_df(n=700)
+        # Inject a feature column that is entirely NaN in the first portion
+        # of the series (simulating a very-long-window feature in a short fold)
+        df = df.copy()
+        df["vol_63d"] = np.nan  # completely NaN — worst case for fillna(median)
+
+        ml = MLSignalGenerator(model_type="random_forest", deadband=0.005)
+        # Should not raise — the fillna(0) fallback must handle all-NaN columns
+        try:
+            result = ml.fit_predict_walk_forward(df, splitter=splitter)
+        except Exception as exc:
+            pytest.fail(
+                f"RandomForest crashed on all-NaN feature column: {exc}. "
+                f"The fillna(0) fallback in _build_xy() should prevent this."
+            )
+        assert len(result.fold_results) > 0
