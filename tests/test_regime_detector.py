@@ -327,24 +327,64 @@ class TestHMMRegimeDetector:
         hmm.fit(df, train_end=str(train_end.date()))
         assert hmm._is_fitted
 
-    def test_high_vol_state_has_highest_variance(self, two_regime_df):
+    def test_high_vol_state_has_highest_variance(self):
         """
-        The state labelled 'crisis' (or highest vol state) should empirically
-        have higher return variance than the lowest-vol state.
-        """
-        hmm = HMMRegimeDetector(n_states=4, n_iter=50, random_state=7)
-        hmm.fit(two_regime_df)
-        result = hmm.predict(two_regime_df, online=False)
+        The state labelled 'crisis' should have empirically higher return
+        variance than the state labelled 'range_bound'. Tests the core
+        semantic claim of _label_states(): assigns 'crisis' to the
+        highest-vol HMM state, so bars labeled 'crisis' should actually
+        exhibit higher return volatility than bars labeled 'range_bound'.
 
-        if "crisis" in result.probabilities.columns and "range_bound" in result.probabilities.columns:
-            crisis_mask = result.labels == "crisis"
-            range_mask  = result.labels == "range_bound"
-            if crisis_mask.sum() > 5 and range_mask.sum() > 5:
-                crisis_vol = two_regime_df.loc[crisis_mask, "returns"].std()
-                range_vol  = two_regime_df.loc[range_mask, "returns"].std()
-                # Not a strict guarantee with random init, but should usually hold
-                # Soft check: just verify both are computed and positive
-                assert crisis_vol >= 0 and range_vol >= 0
+        Uses a three-zone dataset: low-vol range, then a genuine vol spike
+        (like a crash), then recovery. This gives the HMM clear structural
+        differences to find rather than relying on a two_regime_df that
+        only has trending vs range (no genuine crisis zone).
+        """
+        rng = np.random.default_rng(99)
+        n_range, n_crisis, n_trend = 250, 100, 250
+
+        rets = np.concatenate([
+            0.0001 + 0.005 * rng.standard_normal(n_range),   # low vol, flat
+            0.0000 + 0.040 * rng.standard_normal(n_crisis),   # high vol, crisis
+            0.0005 + 0.008 * rng.standard_normal(n_trend),    # medium vol, trend
+        ])
+        closes = 100.0 * np.exp(np.cumsum(rets))
+        idx = pd.date_range("2020-01-01", periods=len(rets), freq="D", tz="UTC")
+
+        df = pd.DataFrame({
+            "open": closes*0.999, "high": closes*1.01, "low": closes*0.99,
+            "close": closes, "volume": np.ones(len(rets))*1_000_000,
+            "returns": rets, "returns_norm": np.zeros(len(rets)),
+            "returns_fwd_1": np.append(rets[1:], np.nan),
+            "returns_fwd_5": np.append(rets[5:], [np.nan]*5),
+        }, index=idx)
+
+        eng = FeatureEngineer(); df = eng.add_all_features(df)
+        sg = SignalGenerator(); df = sg.generate_all(df)
+
+        hmm = HMMRegimeDetector(n_states=4, n_iter=80, random_state=42)
+        hmm.fit(df)
+        result = hmm.predict(df, online=False)
+
+        if "crisis" not in result.probabilities.columns or "range_bound" not in result.probabilities.columns:
+            pytest.skip("HMM did not produce both 'crisis' and 'range_bound' labels")
+
+        crisis_mask = result.labels == "crisis"
+        range_mask  = result.labels == "range_bound"
+
+        if crisis_mask.sum() < 10 or range_mask.sum() < 10:
+            pytest.skip(f"Insufficient labeled bars: crisis={crisis_mask.sum()}, range={range_mask.sum()}")
+
+        crisis_vol = df.loc[crisis_mask, "returns"].std()
+        range_vol  = df.loc[range_mask, "returns"].std()
+
+        assert crisis_vol > range_vol * 1.1, (
+            f"'crisis' state should have materially higher volatility than "
+            f"'range_bound': crisis_vol={crisis_vol:.4f}, range_vol={range_vol:.4f} "
+            f"(ratio={crisis_vol/range_vol:.2f}). The input data has ~5-8x higher "
+            f"daily vol in the crisis zone — if the ratio is near 1.0, "
+            f"_label_states() is likely assigning 'crisis' to the wrong HMM state."
+        )
 
     def test_online_proba_no_lookahead(self, df):
         """
@@ -376,9 +416,16 @@ class TestHMMRegimeDetector:
 
     def test_smoothed_differs_from_online(self, df):
         """
-        Smoothed (predict_proba) and online (predict_proba_online) should
-        generally differ, since smoothed uses future information.
-        This confirms the two methods are actually doing different things.
+        Smoothed (predict_proba, forward-backward) and online
+        (predict_proba_online, expanding window) must produce meaningfully
+        different probabilities for the same bars, because smoothed uses
+        future observations that online has not yet seen.
+
+        The previous assertion (assert diff >= 0) was a tautology —
+        absolute values are always non-negative. This cannot catch the
+        failure mode where both methods return identical results, which
+        would indicate one of them is broken (e.g. both actually running
+        the full forward-backward pass).
         """
         hmm = HMMRegimeDetector(n_states=3, n_iter=20, random_state=1)
         hmm.fit(df)
@@ -386,12 +433,15 @@ class TestHMMRegimeDetector:
         online   = hmm.predict_proba_online(df.iloc[:150].copy())
 
         common = smoothed.dropna().index.intersection(online.dropna().index)
-        if len(common) > 10:
-            # They need not be identical — smoothed uses the whole series
-            diff = (smoothed.loc[common] - online.loc[common]).abs().max().max()
-            # Just confirm both produce valid output; difference can be small
-            # for early bars where future info matters less
-            assert diff >= 0  # sanity: always true, confirms no crash
+        assert len(common) > 10, "Too few common bars to compare methods"
+
+        diff = (smoothed.loc[common] - online.loc[common]).abs().max().max()
+        assert diff > 0.001, (
+            f"Smoothed and online probabilities are nearly identical "
+            f"(max diff={diff:.6f}). Expected meaningful difference since "
+            f"smoothed uses future observations that online does not. "
+            f"One of the two methods may not be implemented correctly."
+        )
 
     def test_missing_feature_columns_raises(self, df):
         hmm = HMMRegimeDetector(n_states=3, feature_cols=["nonexistent_col"])
