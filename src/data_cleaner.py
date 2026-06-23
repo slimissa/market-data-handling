@@ -226,6 +226,12 @@ class DataCleaner:
             f"handle_missing_data: filled {n_filled} cells "
             f"({n_missing_after} remain unfilled)."
         )
+        if n_missing_after > 0:
+            logger.warning(
+                f"handle_missing_data: {n_missing_after} NaN cells remain after fill "
+                f"(gaps longer than max_gap={max_gap} or at series start/end). "
+                f"Downstream feature computation will propagate these NaNs."
+            )
         return df
 
     # ------------------------------------------------------------------ #
@@ -280,8 +286,14 @@ class DataCleaner:
 
         # ---- Forward returns (target labels for ML) ----
         # Negative shift = look forward; NaN at tail is expected.
-        df["returns_fwd_1"] = price.pct_change(-1)
-        df["returns_fwd_5"] = price.pct_change(-5)
+        # Uses the same method as the primary return so the ML target
+        # is on the same scale and distribution as the feature returns.
+        if method == "simple":
+            df["returns_fwd_1"] = price.pct_change(-1)
+            df["returns_fwd_5"] = price.pct_change(-5)
+        else:  # log
+            df["returns_fwd_1"] = np.log(price.shift(-1) / price)
+            df["returns_fwd_5"] = np.log(price.shift(-5) / price)
 
         return df
 
