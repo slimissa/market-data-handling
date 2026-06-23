@@ -665,6 +665,12 @@ class MLSignalGenerator:
         X = sub[feature_cols]
         y = sub[target_col]
         X = X.fillna(X.median())
+        # Fallback: if any feature column is entirely NaN in this fold's
+        # training slice, X.median() is also NaN for that column and the
+        # first fillna is a no-op. XGBoost handles NaN natively via learned
+        # split directions; sklearn's RandomForest does not and will crash.
+        # Fill remaining NaNs with 0 as a safe, model-agnostic fallback.
+        X = X.fillna(0)
         return X, y
 
     def _build_model(self):
