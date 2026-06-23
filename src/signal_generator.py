@@ -586,7 +586,7 @@ class SignalGenerator:
                 bars_held += 1
 
             # ---- Force exit (breakout trades are time-sensitive) ----
-            if position != 0 and bars_held >= max_holding:
+            if position != 0 and bars_held > max_holding:
                 position = 0
                 bars_held = 0
 
@@ -750,6 +750,15 @@ class SignalGenerator:
             ELSE (low vol / range-bound regime):
                 use signal_rsi (mean-reversion works in range markets)
             Most sophisticated — regime detection must be reliable.
+
+            Note: this is a lightweight single-variable heuristic using
+            only vol_21d vs its trailing average. It is not the same as
+            the probabilistic regime detection in regime_detector.py
+            (RuleBasedClassifier / HMMRegimeDetector), which uses
+            multiple features and produces continuous regime probabilities.
+            Use regime_switch as a fast, interpretable fallback; use
+            AdaptiveSignalSwitch from regime_detector.py for genuine
+            probability-weighted regime-conditional weighting.
 
         Note on combining signals:
             Check signal correlation before weighting.
