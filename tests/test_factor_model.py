@@ -293,6 +293,31 @@ class TestOLSRegressor:
         assert reg.n_obs == 0
         assert reg.alpha_annual == 0.0
 
+    def test_near_zero_variance_returns_empty_regression(self, ols):
+        """
+        A constant or near-constant strategy return series must return an
+        empty regression rather than a degenerate OLS result.
+
+        Guards against: a signal that was always flat (zero trades) or had
+        exactly one trade that didn't move price. Statsmodels may return NaN
+        coefficients; numpy lstsq returns zeros silently — both are wrong
+        because they look like real results rather than signalling degenerate
+        input. The guard must catch this before running the regression.
+        """
+        rng = np.random.default_rng(1)
+        n = 300
+        idx = pd.date_range("2020-01-01", periods=n, freq="D", tz="UTC")
+        y_const = pd.Series(np.zeros(n), index=idx)
+        X = pd.DataFrame(
+            {"MKT": 0.0003 + 0.01 * rng.standard_normal(n)},
+            index=idx,
+        )
+        reg = ols.fit(y_const, X, signal_col="flat_signal", model_name="CAPM")
+        assert reg.n_obs == 0, (
+            f"Near-zero-variance signal should return n_obs=0, got {reg.n_obs}"
+        )
+        assert reg.alpha_annual == 0.0
+
     def test_adj_r2_leq_r2(self, ols, factor_df):
         """Adjusted R² penalises extra parameters → adj_r2 ≤ r2."""
         y = make_strategy_returns(factor_df)
