@@ -960,11 +960,15 @@ class RegimeFilteredEnsemble:
 
     def __init__(
         self,
-        mr_signals:    Optional[List[str]] = None,
-        trend_signals: Optional[List[str]] = None,
-        vol_col:       str   = "vol_21d",
-        regime_window: int   = 63,
-        vol_threshold: float = 40.0,   # percentile
+        mr_signals:         Optional[List[str]] = None,
+        trend_signals:       Optional[List[str]] = None,
+        vol_col:             str   = "vol_21d",
+        regime_window:       int   = 63,
+        vol_threshold:       float = 40.0,   # percentile for regime label
+        vol_percentile_mr:   float = 20.0,   # rsi/zscore gate: vol below this = range_bound
+        max_trend_annual:    float = 0.06,   # rsi gate: trend must be weaker than this
+        bb_percentile:       float = 25.0,   # zscore gate: BB squeeze threshold
+        vol_percentile_trend: float = 50.0,  # macd/bb gate: vol above this = trending
     ):
         self.mr_signals    = mr_signals    or [
             "signal_rsi_vol_trend_gated",
@@ -974,9 +978,13 @@ class RegimeFilteredEnsemble:
             "signal_macd_trend_gated",
             "signal_bb_breakout_gated",
         ]
-        self.vol_col       = vol_col
-        self.regime_window = regime_window
-        self.vol_threshold = vol_threshold
+        self.vol_col            = vol_col
+        self.regime_window      = regime_window
+        self.vol_threshold      = vol_threshold
+        self.vol_percentile_mr   = vol_percentile_mr
+        self.max_trend_annual    = max_trend_annual
+        self.bb_percentile       = bb_percentile
+        self.vol_percentile_trend = vol_percentile_trend
 
     def apply(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -994,11 +1002,35 @@ class RegimeFilteredEnsemble:
         """
         df = df.copy()
 
-        # Apply all preset filters
+        # Apply all preset filters, forwarding config-supplied thresholds
+        # so config.yaml values actually control gate behavior.
         presets = RegimeFilterPresets()
-        df = presets.apply_all(df)
+        filters = [
+            presets.rsi_filter(vol_percentile=self.vol_percentile_mr,
+                               max_trend_annual=self.max_trend_annual),
+            presets.zscore_filter(vol_percentile=self.vol_percentile_mr,
+                                  bb_percentile=self.bb_percentile),
+            presets.macd_filter(vol_percentile=self.vol_percentile_trend),
+            presets.bb_breakout_filter(vol_percentile=self.vol_percentile_trend),
+        ]
+        for f in filters:
+            if f.signal_col in df.columns:
+                df[f.output_col] = f.apply(df)
 
         # ---- Regime label ----
+        # IMPORTANT — two-state scheme, distinct from regime_detector.py:
+        #   This label uses only vol-percentile to classify each bar as
+        #   "range_bound" (low vol) or "trending" (high vol). It is a
+        #   coarse binary split, not the four-state scheme
+        #   (range_bound/trending_up/trending_down/crisis) produced by
+        #   RuleBasedClassifier or HMMRegimeDetector in regime_detector.py.
+        #
+        #   Pipeline ordering: Stage 4c (this method) runs BEFORE Stage 4b
+        #   (regime detection). Stage 4b overwrites "regime_label" with
+        #   four-state labels after this method returns. signal_regime_adaptive
+        #   is computed HERE (Stage 4c) using the two-state label — it is
+        #   already correct and complete before Stage 4b runs, so the
+        #   subsequent overwrite of "regime_label" does not affect it.
         if self.vol_col in df.columns:
             vol = df[self.vol_col]
             vol_threshold_series = vol.rolling(
