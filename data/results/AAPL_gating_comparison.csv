@@ -1,0 +1,6 @@
+base_signal,gated_signal,base_sharpe,gated_sharpe,sharpe_delta,base_max_drawdown,gated_max_drawdown,max_drawdown_delta,base_total_return,gated_total_return,base_n_trades,gated_n_trades,trade_reduction_pct,low_sample_size,verdict
+signal_rsi,signal_rsi_vol_trend_gated,-0.2506,-6.614,-6.3633,-0.3816,-0.0204,0.3612,-0.1702,-0.0204,40,1,97.5,True,gating_helped_low_sample
+signal_zscore,signal_zscore_vol_bb_gated,-0.4601,0.0,0.4601,-0.4901,0.0,0.4901,-0.4628,0.0,28,0,100.0,True,gating_helped_low_sample
+signal_macd,signal_macd_trend_gated,-0.1858,-1.0644,-0.8786,-0.4059,-0.0377,0.3681,-0.2163,0.0663,108,3,97.2,True,gating_helped_low_sample
+signal_bb,signal_bb_breakout_gated,-1.8712,-55.2526,-53.3813,-0.0967,-0.0002,0.0965,-0.0478,0.0019,29,1,96.6,True,gating_helped_low_sample
+signal_ensemble,signal_regime_adaptive,-0.9636,-1.1245,-0.161,-0.6252,-0.0377,0.5875,-0.5916,0.0479,88,5,94.3,True,gating_helped_low_sample

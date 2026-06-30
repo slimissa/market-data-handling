@@ -1752,6 +1752,79 @@
       1
     ]
   },
+  "signal_rsi_vol_trend_gated": {
+    "turnover": 0.0007,
+    "long_pct": 0.0,
+    "short_pct": 0.0,
+    "flat_pct": 1.0,
+    "unique_vals": [
+      0
+    ]
+  },
+  "signal_zscore_vol_bb_gated": {
+    "turnover": 0.0021,
+    "long_pct": 0.0,
+    "short_pct": 0.0027,
+    "flat_pct": 0.9973,
+    "unique_vals": [
+      -1,
+      0
+    ]
+  },
+  "signal_macd_trend_gated": {
+    "turnover": 0.0185,
+    "long_pct": 0.0439,
+    "short_pct": 0.0261,
+    "flat_pct": 0.93,
+    "unique_vals": [
+      -1,
+      0,
+      1
+    ]
+  },
+  "signal_bb_breakout_gated": {
+    "turnover": 0.0048,
+    "long_pct": 0.0007,
+    "short_pct": 0.0014,
+    "flat_pct": 0.9979,
+    "unique_vals": [
+      -1,
+      0,
+      1
+    ]
+  },
+  "signal_mr_pool": {
+    "turnover": 0.0021,
+    "long_pct": 0.0,
+    "short_pct": 0.0027,
+    "flat_pct": 0.9973,
+    "unique_vals": [
+      -1,
+      0
+    ]
+  },
+  "signal_trend_pool": {
+    "turnover": 0.0226,
+    "long_pct": 0.0446,
+    "short_pct": 0.0274,
+    "flat_pct": 0.928,
+    "unique_vals": [
+      -1,
+      0,
+      1
+    ]
+  },
+  "signal_regime_adaptive": {
+    "turnover": 0.024,
+    "long_pct": 0.0446,
+    "short_pct": 0.0302,
+    "flat_pct": 0.9252,
+    "unique_vals": [
+      -1,
+      0,
+      1
+    ]
+  },
   "signal_adaptive": {
     "turnover": 0.1317,
     "long_pct": 0.2757,
@@ -1774,6 +1847,13 @@
       "signal_bb": -0.094,
       "signal_bb_strength": -0.049,
       "signal_ensemble": 0.553,
+      "signal_rsi_vol_trend_gated": NaN,
+      "signal_zscore_vol_bb_gated": 0.009,
+      "signal_macd_trend_gated": -0.279,
+      "signal_bb_breakout_gated": -0.004,
+      "signal_mr_pool": 0.009,
+      "signal_trend_pool": -0.275,
+      "signal_regime_adaptive": -0.268,
       "signal_adaptive": -0.085
     },
     "signal_rsi_strength": {
@@ -1786,6 +1866,13 @@
       "signal_bb": -0.015,
       "signal_bb_strength": -0.026,
       "signal_ensemble": -0.136,
+      "signal_rsi_vol_trend_gated": NaN,
+      "signal_zscore_vol_bb_gated": 0.016,
+      "signal_macd_trend_gated": -0.014,
+      "signal_bb_breakout_gated": 0.005,
+      "signal_mr_pool": 0.016,
+      "signal_trend_pool": -0.013,
+      "signal_regime_adaptive": -0.009,
       "signal_adaptive": 0.18
     },
     "signal_macd": {
@@ -1798,6 +1885,13 @@
       "signal_bb": 0.03,
       "signal_bb_strength": -0.045,
       "signal_ensemble": 0.605,
+      "signal_rsi_vol_trend_gated": NaN,
+      "signal_zscore_vol_bb_gated": 0.058,
+      "signal_macd_trend_gated": 0.291,
+      "signal_bb_breakout_gated": 0.017,
+      "signal_mr_pool": 0.058,
+      "signal_trend_pool": 0.289,
+      "signal_regime_adaptive": 0.295,
       "signal_adaptive": 0.794
     },
     "signal_macd_strength": {
@@ -1810,6 +1904,13 @@
       "signal_bb": -0.057,
       "signal_bb_strength": 0.02,
       "signal_ensemble": -0.024,
+      "signal_rsi_vol_trend_gated": NaN,
+      "signal_zscore_vol_bb_gated": -0.06,
+      "signal_macd_trend_gated": 0.063,
+      "signal_bb_breakout_gated": 0.007,
+      "signal_mr_pool": -0.06,
+      "signal_trend_pool": 0.064,
+      "signal_regime_adaptive": 0.051,
       "signal_adaptive": 0.092
     },
     "signal_zscore": {
@@ -1822,6 +1923,13 @@
       "signal_bb": -0.004,
       "signal_bb_strength": 0.01,
       "signal_ensemble": 0.549,
+      "signal_rsi_vol_trend_gated": NaN,
+      "signal_zscore_vol_bb_gated": 0.09,
+      "signal_macd_trend_gated": -0.342,
+      "signal_bb_breakout_gated": -0.03,
+      "signal_mr_pool": 0.09,
+      "signal_trend_pool": -0.342,
+      "signal_regime_adaptive": -0.318,
       "signal_adaptive": -0.071
     },
     "signal_zscore_strength": {
@@ -1834,6 +1942,13 @@
       "signal_bb": -0.041,
       "signal_bb_strength": -0.023,
       "signal_ensemble": -0.064,
+      "signal_rsi_vol_trend_gated": NaN,
+      "signal_zscore_vol_bb_gated": 0.014,
+      "signal_macd_trend_gated": 0.05,
+      "signal_bb_breakout_gated": 0.003,
+      "signal_mr_pool": 0.014,
+      "signal_trend_pool": 0.05,
+      "signal_regime_adaptive": 0.052,
       "signal_adaptive": 0.165
     },
     "signal_bb": {
@@ -1846,6 +1961,13 @@
       "signal_bb": 1.0,
       "signal_bb_strength": 0.467,
       "signal_ensemble": 0.002,
+      "signal_rsi_vol_trend_gated": NaN,
+      "signal_zscore_vol_bb_gated": 0.079,
+      "signal_macd_trend_gated": -0.006,
+      "signal_bb_breakout_gated": 0.26,
+      "signal_mr_pool": 0.079,
+      "signal_trend_pool": 0.039,
+      "signal_regime_adaptive": 0.053,
       "signal_adaptive": 0.095
     },
     "signal_bb_strength": {
@@ -1858,6 +1980,13 @@
       "signal_bb": 0.467,
       "signal_bb_strength": 1.0,
       "signal_ensemble": -0.035,
+      "signal_rsi_vol_trend_gated": NaN,
+      "signal_zscore_vol_bb_gated": 0.004,
+      "signal_macd_trend_gated": -0.006,
+      "signal_bb_breakout_gated": 0.001,
+      "signal_mr_pool": 0.004,
+      "signal_trend_pool": -0.005,
+      "signal_regime_adaptive": -0.004,
       "signal_adaptive": 0.057
     },
     "signal_ensemble": {
@@ -1870,7 +1999,147 @@
       "signal_bb": 0.002,
       "signal_bb_strength": -0.035,
       "signal_ensemble": 1.0,
+      "signal_rsi_vol_trend_gated": NaN,
+      "signal_zscore_vol_bb_gated": 0.052,
+      "signal_macd_trend_gated": -0.099,
+      "signal_bb_breakout_gated": -0.002,
+      "signal_mr_pool": 0.052,
+      "signal_trend_pool": -0.098,
+      "signal_regime_adaptive": -0.086,
       "signal_adaptive": 0.445
+    },
+    "signal_rsi_vol_trend_gated": {
+      "signal_rsi": NaN,
+      "signal_rsi_strength": NaN,
+      "signal_macd": NaN,
+      "signal_macd_strength": NaN,
+      "signal_zscore": NaN,
+      "signal_zscore_strength": NaN,
+      "signal_bb": NaN,
+      "signal_bb_strength": NaN,
+      "signal_ensemble": NaN,
+      "signal_rsi_vol_trend_gated": NaN,
+      "signal_zscore_vol_bb_gated": NaN,
+      "signal_macd_trend_gated": NaN,
+      "signal_bb_breakout_gated": NaN,
+      "signal_mr_pool": NaN,
+      "signal_trend_pool": NaN,
+      "signal_regime_adaptive": NaN,
+      "signal_adaptive": NaN
+    },
+    "signal_zscore_vol_bb_gated": {
+      "signal_rsi": 0.009,
+      "signal_rsi_strength": 0.016,
+      "signal_macd": 0.058,
+      "signal_macd_strength": -0.06,
+      "signal_zscore": 0.09,
+      "signal_zscore_strength": 0.014,
+      "signal_bb": 0.079,
+      "signal_bb_strength": 0.004,
+      "signal_ensemble": 0.052,
+      "signal_rsi_vol_trend_gated": NaN,
+      "signal_zscore_vol_bb_gated": 1.0,
+      "signal_macd_trend_gated": 0.004,
+      "signal_bb_breakout_gated": -0.001,
+      "signal_mr_pool": 1.0,
+      "signal_trend_pool": 0.003,
+      "signal_regime_adaptive": 0.195,
+      "signal_adaptive": 0.069
+    },
+    "signal_macd_trend_gated": {
+      "signal_rsi": -0.279,
+      "signal_rsi_strength": -0.014,
+      "signal_macd": 0.291,
+      "signal_macd_strength": 0.063,
+      "signal_zscore": -0.342,
+      "signal_zscore_strength": 0.05,
+      "signal_bb": -0.006,
+      "signal_bb_strength": -0.006,
+      "signal_ensemble": -0.099,
+      "signal_rsi_vol_trend_gated": NaN,
+      "signal_zscore_vol_bb_gated": 0.004,
+      "signal_macd_trend_gated": 1.0,
+      "signal_bb_breakout_gated": 0.001,
+      "signal_mr_pool": 0.004,
+      "signal_trend_pool": 0.986,
+      "signal_regime_adaptive": 0.967,
+      "signal_adaptive": 0.24
+    },
+    "signal_bb_breakout_gated": {
+      "signal_rsi": -0.004,
+      "signal_rsi_strength": 0.005,
+      "signal_macd": 0.017,
+      "signal_macd_strength": 0.007,
+      "signal_zscore": -0.03,
+      "signal_zscore_strength": 0.003,
+      "signal_bb": 0.26,
+      "signal_bb_strength": 0.001,
+      "signal_ensemble": -0.002,
+      "signal_rsi_vol_trend_gated": NaN,
+      "signal_zscore_vol_bb_gated": -0.001,
+      "signal_macd_trend_gated": 0.001,
+      "signal_bb_breakout_gated": 1.0,
+      "signal_mr_pool": -0.001,
+      "signal_trend_pool": 0.17,
+      "signal_regime_adaptive": 0.167,
+      "signal_adaptive": 0.02
+    },
+    "signal_mr_pool": {
+      "signal_rsi": 0.009,
+      "signal_rsi_strength": 0.016,
+      "signal_macd": 0.058,
+      "signal_macd_strength": -0.06,
+      "signal_zscore": 0.09,
+      "signal_zscore_strength": 0.014,
+      "signal_bb": 0.079,
+      "signal_bb_strength": 0.004,
+      "signal_ensemble": 0.052,
+      "signal_rsi_vol_trend_gated": NaN,
+      "signal_zscore_vol_bb_gated": 1.0,
+      "signal_macd_trend_gated": 0.004,
+      "signal_bb_breakout_gated": -0.001,
+      "signal_mr_pool": 1.0,
+      "signal_trend_pool": 0.003,
+      "signal_regime_adaptive": 0.195,
+      "signal_adaptive": 0.069
+    },
+    "signal_trend_pool": {
+      "signal_rsi": -0.275,
+      "signal_rsi_strength": -0.013,
+      "signal_macd": 0.289,
+      "signal_macd_strength": 0.064,
+      "signal_zscore": -0.342,
+      "signal_zscore_strength": 0.05,
+      "signal_bb": 0.039,
+      "signal_bb_strength": -0.005,
+      "signal_ensemble": -0.098,
+      "signal_rsi_vol_trend_gated": NaN,
+      "signal_zscore_vol_bb_gated": 0.003,
+      "signal_macd_trend_gated": 0.986,
+      "signal_bb_breakout_gated": 0.17,
+      "signal_mr_pool": 0.003,
+      "signal_trend_pool": 1.0,
+      "signal_regime_adaptive": 0.981,
+      "signal_adaptive": 0.24
+    },
+    "signal_regime_adaptive": {
+      "signal_rsi": -0.268,
+      "signal_rsi_strength": -0.009,
+      "signal_macd": 0.295,
+      "signal_macd_strength": 0.051,
+      "signal_zscore": -0.318,
+      "signal_zscore_strength": 0.052,
+      "signal_bb": 0.053,
+      "signal_bb_strength": -0.004,
+      "signal_ensemble": -0.086,
+      "signal_rsi_vol_trend_gated": NaN,
+      "signal_zscore_vol_bb_gated": 0.195,
+      "signal_macd_trend_gated": 0.967,
+      "signal_bb_breakout_gated": 0.167,
+      "signal_mr_pool": 0.195,
+      "signal_trend_pool": 0.981,
+      "signal_regime_adaptive": 1.0,
+      "signal_adaptive": 0.249
     },
     "signal_adaptive": {
       "signal_rsi": -0.085,
@@ -1882,6 +2151,13 @@
       "signal_bb": 0.095,
       "signal_bb_strength": 0.057,
       "signal_ensemble": 0.445,
+      "signal_rsi_vol_trend_gated": NaN,
+      "signal_zscore_vol_bb_gated": 0.069,
+      "signal_macd_trend_gated": 0.24,
+      "signal_bb_breakout_gated": 0.02,
+      "signal_mr_pool": 0.069,
+      "signal_trend_pool": 0.24,
+      "signal_regime_adaptive": 0.249,
       "signal_adaptive": 1.0
     }
   }

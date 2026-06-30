@@ -665,3 +665,106 @@ class TestFactorRegression:
         reg = self._make_reg(t=0.8, p=0.45)
         line = reg.summary_line()
         assert "***" not in line and "**" not in line and "* " not in line
+
+
+# ======================================================================
+# Regression tests: silent empty-download bug in _build_etf_proxies()
+#
+# Discovered while preparing Power BI exports: every factor_report.json
+# in a real watchlist run showed n_obs=0 for every signal x model, with
+# no error anywhere in the pipeline log. Root cause: yfinance does not
+# raise on network failure or rate-limiting — it returns an empty
+# DataFrame with the right column structure but zero rows. Every
+# downstream check ("is this ETF column present?") passes vacuously on
+# an empty frame, so the bug propagated silently all the way to the
+# factor report with no diagnostic trail.
+# ======================================================================
+
+class TestETFProxyDownloadFailure:
+
+    @pytest.fixture
+    def loader(self, tmp_path):
+        return FactorDataLoader(cache_dir=str(tmp_path / "factors"))
+
+    def test_empty_yf_download_raises_not_silent(self, loader, monkeypatch):
+        """An empty download (network failure / rate-limit) must raise,
+        not silently produce a factor_df with only the RF column."""
+        import factor_model as fm_module
+
+        class _FakeYF:
+            @staticmethod
+            def download(*a, **kw):
+                # Mirrors yfinance's real failure mode: empty frame with
+                # the expected MultiIndex column structure, zero rows.
+                cols = pd.MultiIndex.from_product(
+                    [["Close", "Open", "High", "Low", "Volume"], ["SPY", "IWM"]]
+                )
+                return pd.DataFrame(columns=cols)
+
+        monkeypatch.setattr(fm_module, "yf", _FakeYF, raising=False)
+        # _build_etf_proxies does `import yfinance as yf` inline, so patch
+        # the module yfinance itself resolves to.
+        import sys
+        monkeypatch.setitem(sys.modules, "yfinance", _FakeYF)
+
+        with pytest.raises(RuntimeError, match="0 rows"):
+            loader._build_etf_proxies(
+                start_date="2024-01-01",
+                end_date="2024-02-01",
+                factors=["MKT"],
+                rf_daily=0.0001,
+            )
+
+    def test_poisoned_empty_cache_is_discarded_not_trusted(self, loader, tmp_path):
+        """A cache file containing only the RF column (the artifact of a
+        prior failed download) must be treated as invalid and
+        re-downloaded, not returned as if it were real factor data."""
+        cache_path = (
+            Path(loader.cache_dir)
+            / "etf_proxies_2024-01-01_2024-02-01_MKT.parquet"
+        )
+        poisoned = pd.DataFrame(
+            {"RF": [0.0001] * 10},
+            index=pd.date_range("2024-01-01", periods=10, freq="D"),
+        )
+        poisoned.to_parquet(cache_path)
+        assert cache_path.exists()
+
+        # _build_etf_proxies should detect the poisoned cache, delete it,
+        # and attempt a real download (which will fail in this sandbox
+        # with no yfinance network access — but it must NOT silently
+        # return the poisoned cache).
+        with pytest.raises(Exception):
+            loader._build_etf_proxies(
+                start_date="2024-01-01",
+                end_date="2024-02-01",
+                factors=["MKT"],
+                rf_daily=0.0001,
+            )
+        # The poisoned file must have been removed, not returned.
+        assert not cache_path.exists()
+
+    def test_healthy_cache_with_real_factor_data_is_still_used(self, loader, tmp_path):
+        """A cache file with genuine factor columns (not just RF) should
+        still be trusted and returned without re-downloading."""
+        cache_path = (
+            Path(loader.cache_dir)
+            / "etf_proxies_2024-01-01_2024-02-01_MKT.parquet"
+        )
+        healthy = pd.DataFrame(
+            {
+                "RF": [0.0001] * 10,
+                "MKT": np.random.default_rng(1).standard_normal(10) * 0.01,
+            },
+            index=pd.date_range("2024-01-01", periods=10, freq="D"),
+        )
+        healthy.to_parquet(cache_path)
+
+        result = loader._build_etf_proxies(
+            start_date="2024-01-01",
+            end_date="2024-02-01",
+            factors=["MKT"],
+            rf_daily=0.0001,
+        )
+        assert "MKT" in result.columns
+        assert len(result) == 10

@@ -5,7 +5,14 @@
     "signal_zscore": 0.087,
     "signal_bb": -0.921,
     "signal_ensemble": 0.088,
-    "signal_adaptive": -1.023
+    "signal_rsi_vol_trend_gated": 0.0,
+    "signal_zscore_vol_bb_gated": 0.0,
+    "signal_macd_trend_gated": 0.586,
+    "signal_bb_breakout_gated": 0.0,
+    "signal_mr_pool": 0.0,
+    "signal_trend_pool": 0.586,
+    "signal_regime_adaptive": 2.459,
+    "signal_adaptive": -1.614
   },
   "range_bound": {
     "signal_rsi": -0.846,
@@ -13,7 +20,14 @@
     "signal_zscore": 4.579,
     "signal_bb": 1.189,
     "signal_ensemble": 1.066,
-    "signal_adaptive": -2.611
+    "signal_rsi_vol_trend_gated": 0.0,
+    "signal_zscore_vol_bb_gated": 0.0,
+    "signal_macd_trend_gated": 0.0,
+    "signal_bb_breakout_gated": 0.0,
+    "signal_mr_pool": 0.0,
+    "signal_trend_pool": 0.0,
+    "signal_regime_adaptive": NaN,
+    "signal_adaptive": -0.646
   },
   "trending_down": {
     "signal_rsi": 0.043,
@@ -21,7 +35,14 @@
     "signal_zscore": -0.385,
     "signal_bb": -0.227,
     "signal_ensemble": -2.896,
-    "signal_adaptive": 1.391
+    "signal_rsi_vol_trend_gated": -0.942,
+    "signal_zscore_vol_bb_gated": 0.0,
+    "signal_macd_trend_gated": 0.0,
+    "signal_bb_breakout_gated": 0.859,
+    "signal_mr_pool": -0.942,
+    "signal_trend_pool": 0.859,
+    "signal_regime_adaptive": NaN,
+    "signal_adaptive": 1.444
   },
   "trending_up": {
     "signal_rsi": -0.327,
@@ -29,7 +50,14 @@
     "signal_zscore": -0.943,
     "signal_bb": -0.632,
     "signal_ensemble": -1.731,
-    "signal_adaptive": -0.41
+    "signal_rsi_vol_trend_gated": -0.598,
+    "signal_zscore_vol_bb_gated": 0.0,
+    "signal_macd_trend_gated": 0.285,
+    "signal_bb_breakout_gated": 0.0,
+    "signal_mr_pool": -0.598,
+    "signal_trend_pool": 0.285,
+    "signal_regime_adaptive": 0.045,
+    "signal_adaptive": -0.762
   },
   "pct_crisis": {
     "signal_rsi": 0.15,
@@ -37,6 +65,13 @@
     "signal_zscore": 0.259,
     "signal_bb": 0.224,
     "signal_ensemble": 0.24,
+    "signal_rsi_vol_trend_gated": 0.224,
+    "signal_zscore_vol_bb_gated": 0.224,
+    "signal_macd_trend_gated": 0.224,
+    "signal_bb_breakout_gated": 0.224,
+    "signal_mr_pool": 0.224,
+    "signal_trend_pool": 0.224,
+    "signal_regime_adaptive": 0.613,
     "signal_adaptive": 0.177
   },
   "pct_range_bound": {
@@ -45,6 +80,13 @@
     "signal_zscore": 0.015,
     "signal_bb": 0.098,
     "signal_ensemble": 0.074,
+    "signal_rsi_vol_trend_gated": 0.098,
+    "signal_zscore_vol_bb_gated": 0.098,
+    "signal_macd_trend_gated": 0.098,
+    "signal_bb_breakout_gated": 0.098,
+    "signal_mr_pool": 0.098,
+    "signal_trend_pool": 0.098,
+    "signal_regime_adaptive": 0.0,
     "signal_adaptive": 0.049
   },
   "pct_trending_down": {
@@ -53,6 +95,13 @@
     "signal_zscore": 0.155,
     "signal_bb": 0.195,
     "signal_ensemble": 0.181,
+    "signal_rsi_vol_trend_gated": 0.195,
+    "signal_zscore_vol_bb_gated": 0.195,
+    "signal_macd_trend_gated": 0.195,
+    "signal_bb_breakout_gated": 0.195,
+    "signal_mr_pool": 0.195,
+    "signal_trend_pool": 0.195,
+    "signal_regime_adaptive": 0.032,
     "signal_adaptive": 0.172
   },
   "pct_trending_up": {
@@ -61,6 +110,13 @@
     "signal_zscore": 0.571,
     "signal_bb": 0.483,
     "signal_ensemble": 0.505,
+    "signal_rsi_vol_trend_gated": 0.483,
+    "signal_zscore_vol_bb_gated": 0.483,
+    "signal_macd_trend_gated": 0.483,
+    "signal_bb_breakout_gated": 0.483,
+    "signal_mr_pool": 0.483,
+    "signal_trend_pool": 0.483,
+    "signal_regime_adaptive": 0.355,
     "signal_adaptive": 0.602
   }
 }

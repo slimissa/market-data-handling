@@ -11,6 +11,7 @@ Usage:
 import argparse
 import json
 import logging
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -26,6 +27,9 @@ from backtester import VectorisedBacktester, TransactionCostModel
 from factor_model import FactorModel, RegimeAnalyser
 from regime_filter import RegimeFilteredEnsemble, RegimeFilterPresets
 from ml_signal import MLSignalGenerator, WalkForwardSplitter
+from presets import apply_preset, list_presets, get_preset
+from cli_utils import resolve_dates, OutputWriter
+from market_search import MarketSearch
 from regime_detector import (
     RuleBasedClassifier,
     HMMRegimeDetector,
@@ -873,110 +877,340 @@ class MarketDataPipeline:
         return out
 
 
+
+# ======================================================================
+# Dry-run helper
+# ======================================================================
+
+def _run_dry_run(symbols: List[str], start_date: str, end_date: str) -> None:
+    """
+    Validate tickers and estimate data availability without downloading
+    or running the pipeline. Prints a summary table and exits.
+    """
+    import yfinance as yf
+    from datetime import date as date_cls
+    from market_search import _safe_fast_info_read
+
+    print(f"\n── Dry Run ─ {len(symbols)} symbol(s)  {start_date} → {end_date}\n")
+    print(f"  {'Symbol':<12} {'Status':<8} {'Avail From':<14} {'Est. Bars':<12} {'Currency'}")
+    print("  " + "─" * 65)
+
+    valid = 0
+    for sym in symbols:
+        try:
+            ticker = yf.Ticker(sym)
+            info = ticker.fast_info
+            last_price = _safe_fast_info_read(info, "last_price")
+            currency = _safe_fast_info_read(info, "currency") or "?"
+
+            if last_price is None:
+                print(f"  {sym:<12} {'✗ INVALID':<8} "
+                      f"{'no price data — bad symbol or API issue':<14}")
+                continue
+
+            # Quick history probe: fetch just 2 bars to find earliest date
+            hist = ticker.history(period="max", interval="1d", auto_adjust=True)
+            if hist.empty:
+                print(f"  {sym:<12} {'✗ NO DATA':<8}")
+                continue
+
+            avail_from = hist.index[0].strftime("%Y-%m-%d")
+            # Estimate bars in requested range
+            req_start = date_cls.fromisoformat(start_date)
+            req_end   = date_cls.fromisoformat(end_date)
+            hist_in_range = hist.loc[start_date:end_date]
+            est_bars = len(hist_in_range)
+
+            print(f"  {sym:<12} {'✓ OK':<8} {avail_from:<14} {est_bars:<12} {currency}")
+            valid += 1
+
+        except Exception as exc:
+            print(f"  {sym:<12} {'✗ ERROR':<8} {str(exc)[:40]}")
+
+    print(f"\n  {valid}/{len(symbols)} symbols valid\n")
+    sys.exit(0)
+
+
+
+
+
 # ======================================================================
 # CLI
 # ======================================================================
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="QuantOS Market Data Pipeline")
-    parser.add_argument("--config",  default="config.yaml")
-    parser.add_argument("--symbols", nargs="*")
-    parser.add_argument("--start",   default="2020-01-01")
-    parser.add_argument("--end",     default="2023-12-31")
+    parser = argparse.ArgumentParser(
+        description="QuantOS Market Data Pipeline",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python pipeline.py --symbols AAPL MSFT --period 5y
+  python pipeline.py --preset crypto --symbols BTC-USD --period max
+  python pipeline.py --period ytd --interval 1h --tz US/Eastern
+  python pipeline.py --search semiconductor --period 3y
+  python pipeline.py --add TSLA NVDA --config config.yaml
+  python pipeline.py --symbols AAPL --dry-run --period max
+  python pipeline.py --period 5y --format excel
+  python pipeline.py --preset equities --period 3y --export-config saved.yaml
+        """,
+    )
+
+    # ── Data selection ──────────────────────────────────────────────────
+    parser.add_argument("--config",   default="config.yaml",
+                        help="Path to YAML config file")
+    parser.add_argument("--symbols",  nargs="*",
+                        help="Override watchlist with specific tickers")
+    parser.add_argument("--start",    default=None,
+                        help="Start date YYYY-MM-DD (overrides --period)")
+    parser.add_argument("--end",      default=None,
+                        help="End date YYYY-MM-DD (overrides --period)")
+    parser.add_argument(
+        "--period",
+        default=None,
+        metavar="PERIOD",
+        help=(
+            "Date range shorthand: 1y, 2y, 3y, 5y, 10y, ytd, max. "
+            "Explicit --start/--end override this when both are provided."
+        ),
+    )
+
+    # ── Market/instrument settings ──────────────────────────────────────
+    parser.add_argument(
+        "--interval",
+        default=None,
+        choices=["1m","5m","15m","30m","1h","2h","4h","1d","1wk","1mo"],
+        help="Data interval (default: from config, usually 1d)",
+    )
+    parser.add_argument(
+        "--tz",
+        default=None,
+        metavar="TIMEZONE",
+        help="Timezone for data (e.g. US/Eastern, Europe/London, UTC, Asia/Tokyo)",
+    )
+    parser.add_argument(
+        "--preset",
+        default=None,
+        choices=["equities", "crypto", "forex"],
+        help="Apply a signal preset for a specific market type",
+    )
+
+    # ── Pipeline control ────────────────────────────────────────────────
     parser.add_argument(
         "--no-factor", action="store_true",
-        help="Skip factor attribution (faster runs during development)"
+        help="Skip factor attribution (faster runs during development)",
     )
+    parser.add_argument(
+        "--ml", action="store_true",
+        help="Enable ML signal generation (slow, off by default)",
+    )
+
+    # ── Output ──────────────────────────────────────────────────────────
+    parser.add_argument(
+        "--format",
+        default="csv",
+        choices=["csv", "parquet", "excel"],
+        help="Output format for result files (default: csv)",
+    )
+    parser.add_argument(
+        "--export-config",
+        default=None,
+        metavar="PATH",
+        help="Save effective config (defaults + overrides) to a new YAML and exit",
+    )
+
+    # ── Discovery ───────────────────────────────────────────────────────
+    parser.add_argument(
+        "--search",
+        default=None,
+        metavar="QUERY",
+        help="Search the ticker database by name/sector/industry and print results",
+    )
+    parser.add_argument(
+        "--search-field",
+        default="all",
+        choices=["all", "sector", "industry", "name", "symbol"],
+        help="Field to search in (default: all)",
+    )
+    parser.add_argument(
+        "--add",
+        nargs="*",
+        metavar="TICKER",
+        help="Add ticker(s) to the watchlist in config.yaml",
+    )
+    parser.add_argument(
+        "--list-sectors",
+        action="store_true",
+        help="List all sectors in the ticker database and exit",
+    )
+    parser.add_argument(
+        "--list-presets",
+        action="store_true",
+        help="List available signal presets and exit",
+    )
+
+    # ── Utility ─────────────────────────────────────────────────────────
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Validate symbols and estimate bar counts without running "
+            "the pipeline. Useful before committing to a large run."
+        ),
+    )
+
     args = parser.parse_args()
+
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)-8s %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    # ── Handle pure-information commands (no pipeline run) ───────────────
+
+    if args.list_presets:
+        print("\nAvailable presets:\n")
+        for name, desc in list_presets().items():
+            print(f"  {name:<12} {desc}")
+        print()
+        sys.exit(0)
+
+    if args.list_sectors:
+        ms = MarketSearch()
+        print("\nSectors in ticker database:\n")
+        for sector in ms.sectors():
+            tickers = [r["symbol"] for r in ms.search(sector, field="sector")]
+            print(f"  {sector:<30} ({len(tickers)} tickers)")
+        print()
+        sys.exit(0)
+
+    if args.search:
+        ms = MarketSearch()
+        results = ms.search(args.search, field=args.search_field)
+        print(f"\nSearch results for '{args.search}' (field={args.search_field}):\n")
+        if not results:
+            print("  No results found.\n")
+        else:
+            print(f"  {'Symbol':<10} {'Sector':<25} {'Industry':<30} Name")
+            print("  " + "─" * 80)
+            for r in results:
+                print(f"  {r['symbol']:<10} {r['sector']:<25} {r['industry']:<30} {r['name']}")
+            print(f"\n  {len(results)} result(s). "
+                  f"Add to watchlist: --add {' '.join(r['symbol'] for r in results[:5])}\n")
+        sys.exit(0)
+
+    if args.add:
+        ms = MarketSearch()
+        updated = ms.add_to_watchlist(args.add, config_path=args.config)
+        print(f"\nWatchlist updated ({len(updated)} total): {updated}\n")
+        sys.exit(0)
+
+    # ── Build the pipeline ───────────────────────────────────────────────
 
     pipeline = MarketDataPipeline(args.config)
 
+    # Apply preset first (lowest priority — config and CLI flags override)
+    if args.preset:
+        apply_preset(pipeline.config, args.preset)
+        logging.getLogger(__name__).info(f"Applied preset: {args.preset}")
+
+    # CLI flags override config (highest priority)
     if args.no_factor:
         pipeline.config["factor"]["enabled"] = False
+    if args.ml:
+        pipeline.config["ml_signal"]["enabled"] = True
+    if args.interval:
+        pipeline.config["interval"] = args.interval
+    if args.tz:
+        pipeline.config["timezone"] = args.tz
 
-    results = pipeline.run(
-        symbols=args.symbols if args.symbols else None,
-        start_date=args.start,
-        end_date=args.end,
+    # Resolve date range
+    start_date, end_date = resolve_dates(
+        period=args.period,
+        start=args.start,
+        end=args.end,
+        default_start="2020-01-01",
     )
 
-    # ── CLI summary ──────────────────────────────────────────────────────
-    print("\n── Summary ─────────────────────────────────────────────────────────")
-    base_cols = {
-        "open", "high", "low", "close", "volume", "returns",
-        "returns_norm", "returns_fwd_1", "returns_fwd_5", "tr",
-    }
-    for ticker, df in results.items():
-        feat_cols = [
-            c for c in df.columns
-            if c not in base_cols
-            and not c.startswith("signal_")
-            and c != "position_scale"
-        ]
-        sig_cols = [c for c in df.columns if c.startswith("signal_")]
+    # ── Export config and exit ───────────────────────────────────────────
+    if args.export_config:
+        # Bake resolved dates into the exported config
+        export_cfg = dict(pipeline.config)
+        export_cfg["_resolved_start"] = start_date
+        export_cfg["_resolved_end"]   = end_date
+        export_cfg["_preset"]          = args.preset or "none"
+        with open(args.export_config, "w") as f:
+            yaml.dump(export_cfg, f, default_flow_style=False, allow_unicode=True)
+        print(f"\nEffective config exported to: {args.export_config}\n")
+        sys.exit(0)
 
-        sharpe_str = ""
-        bt_path = pipeline._data_dir / "results" / f"{ticker}_backtest.csv"
-        if bt_path.exists():
-            try:
-                bt_df = pd.read_csv(bt_path, index_col=0)
-                if "signal_ensemble" in bt_df.index and "sharpe" in bt_df.columns:
-                    s = bt_df.loc["signal_ensemble", "sharpe"]
-                    sharpe_str = f"  ensemble_Sharpe={s:+.2f}"
-            except Exception:
-                pass
-        
-        adaptive_str = ""
-        if bt_path.exists():
-            try:
-                bt_df = pd.read_csv(bt_path, index_col=0)
-                if "signal_adaptive" in bt_df.index and "sharpe" in bt_df.columns:
-                    a = bt_df.loc["signal_adaptive", "sharpe"]
-                    adaptive_str = f"  adaptive_Sharpe={a:+.2f}"
-            except Exception:
-                pass
+    symbols = args.symbols if args.symbols else None
 
-        alpha_str = ""
-        if pipeline.config["factor"]["enabled"]:
-            f_path = pipeline._data_dir / "results" / f"{ticker}_factor_report.json"
-            if f_path.exists():
-                try:
-                    with open(f_path) as fh:
-                        f_data = json.load(fh)
-                    ens_regs = f_data.get("regressions", {}).get("signal_ensemble", [])
-                    capm = next((r for r in ens_regs if r["model"] == "CAPM"), None)
-                    if capm:
-                        sig_flag = "✓" if capm["significant"] else "✗"
-                        alpha_str = (
-                            f"  CAPM_alpha={capm['alpha_annual']:+.3f}"
-                            f"(t={capm['t_stat']:+.2f}{sig_flag})"
+    # ── Dry run ──────────────────────────────────────────────────────────
+    if args.dry_run:
+        sym_list = symbols or list(pipeline.config.get("watchlist", []))
+        if not sym_list:
+            print("No symbols specified. Use --symbols or check watchlist in config.")
+            sys.exit(1)
+        _run_dry_run(sym_list, start_date, end_date)
+        # _run_dry_run calls sys.exit()
+
+    # ── Full pipeline run ────────────────────────────────────────────────
+    try:
+        from tqdm import tqdm
+        _have_tqdm = True
+    except ImportError:
+        _have_tqdm = False
+
+    # Wire the output format into the pipeline's save methods
+    output_fmt = args.format.lower()
+    pipeline._output_format = output_fmt
+
+    results = pipeline.run(
+        symbols=symbols,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+    # Excel post-processing: flush per-ticker workbooks if format=excel
+    if output_fmt == "excel":
+        results_dir = pipeline._data_dir / "results"
+        try:
+            import openpyxl
+            for ticker, df in results.items():
+                writer_xl = pd.ExcelWriter(
+                    results_dir / f"{ticker}_results.xlsx",
+                    engine="openpyxl",
+                )
+                # Load all CSVs for this ticker and write as sheets
+                sheet_map = {
+                    "backtest":        f"{ticker}_backtest.csv",
+                    "gating":          f"{ticker}_gating_comparison.csv",
+                    "factor":          None,   # JSON, skip for Excel
+                    "regime":          None,
+                    "ml_fold":         f"{ticker}_ml_fold_report.csv",
+                    "ml_importance":   f"{ticker}_ml_importance.csv",
+                    "ml_sweep":        f"{ticker}_ml_threshold_sweep.csv",
+                }
+                any_sheet = False
+                for sheet, filename in sheet_map.items():
+                    if filename is None:
+                        continue
+                    fpath = results_dir / filename
+                    if fpath.exists():
+                        pd.read_csv(fpath, index_col=0).reset_index().to_excel(
+                            writer_xl, sheet_name=sheet[:31], index=False
                         )
-                except Exception:
-                    pass
-        else:
-            alpha_str = "  CAPM_alpha=N/A"
+                        any_sheet = True
+                if any_sheet:
+                    writer_xl.close()
+                    print(f"  Excel workbook: {results_dir / (ticker + '_results.xlsx')}")
+        except ImportError:
+            print("  Note: openpyxl not installed — Excel output skipped. "
+                  "Install with: pip install openpyxl")
 
-        gating_str = ""
-        gc_path = pipeline._data_dir / "results" / f"{ticker}_gating_comparison.csv"
-        if gc_path.exists():
-            try:
-                gc_df = pd.read_csv(gc_path, index_col=0)
-                if "signal_ensemble" in gc_df.index:
-                    row = gc_df.loc["signal_ensemble"]
-                    gating_str = (
-                        f"  gating[{row['verdict']}]"
-                        f" DD={row['base_max_drawdown']:+.1%}->{row['gated_max_drawdown']:+.1%}"
-                    )
-            except Exception:
-                pass
-
-        print(
-            f"  {ticker:6s}  rows={len(df):5d}  "
-            f"features={len(feat_cols):2d}  "
-            f"signals={len(sig_cols):2d}"
-            f"{sharpe_str}{adaptive_str}{alpha_str}{gating_str}"
-        )
-
-    print(f"\nOutputs in: {pipeline._data_dir}/")
-    print(f"  processed/   — CSVs + quality reports")
-    print(f"  results/     — backtest CSVs + factor reports + rolling alpha")
+    if args.preset:
+        print(f"  preset={args.preset}  period={args.period or 'explicit'}  "
+              f"interval={pipeline.config.get('interval','1d')}  "
+              f"tz={pipeline.config.get('timezone','US/Eastern')}")

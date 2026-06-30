@@ -294,8 +294,23 @@ class FactorDataLoader:
         if cache_path.exists():
             try:
                 factor_df = pd.read_parquet(cache_path)
-                logger.info(f"ETF proxies loaded from cache: {cache_path.name}")
-                return factor_df
+                # A cache file can exist on disk yet be the product of a
+                # previously-failed download (see the empty-download guard
+                # below) — it would have only the constant RF column and
+                # zero real factor data. Trusting it silently re-poisons
+                # every run that follows. Treat it as invalid and
+                # re-download instead of returning it.
+                real_factor_cols = [c for c in factor_df.columns if c != "RF"]
+                if factor_df.empty or len(real_factor_cols) == 0:
+                    logger.warning(
+                        f"Cached file {cache_path.name} has no usable factor "
+                        f"columns (likely from a prior failed download) — "
+                        f"discarding cache and re-downloading."
+                    )
+                    cache_path.unlink()
+                else:
+                    logger.info(f"ETF proxies loaded from cache: {cache_path.name}")
+                    return factor_df
             except Exception as exc:
                 logger.warning(f"Cache read failed ({exc}), re-downloading.")
 
@@ -318,6 +333,24 @@ class FactorDataLoader:
             progress=False,
         )
 
+        # yfinance does NOT raise on network failure, rate-limiting, or a
+        # Yahoo schema change — it returns an empty DataFrame with the
+        # right column structure but zero rows. Every downstream check
+        # ("is this column present?") passes vacuously on an empty frame,
+        # so without this guard the pipeline silently produces a
+        # factor_df with only the RF column, caches THAT poisoned empty
+        # result to parquet, and every regression after it reports
+        # n_obs=0 with no error anywhere in the log. Fail loudly instead.
+        if raw.empty or len(raw) == 0:
+            raise RuntimeError(
+                f"yfinance returned 0 rows for {sorted(tickers_needed)} "
+                f"({start_date} → {end_date}). This usually means a network "
+                f"failure, Yahoo Finance rate-limiting, or an API outage — "
+                f"not a real absence of data. Factor attribution cannot "
+                f"proceed without real ETF price data. Retry the run, or "
+                f"check network access to query1/query2.finance.yahoo.com."
+            )
+
         # Extract close prices
         if isinstance(raw.columns, pd.MultiIndex):
             prices = raw["Close"]
@@ -325,6 +358,13 @@ class FactorDataLoader:
             prices = raw[["Close"]].rename(columns={"Close": list(tickers_needed)[0]})
 
         returns = prices.pct_change().dropna()
+        if returns.empty:
+            raise RuntimeError(
+                f"ETF proxy download for {sorted(tickers_needed)} produced "
+                f"0 usable return rows after pct_change(). Raw download had "
+                f"{len(raw)} rows but all became NaN — check the date range "
+                f"({start_date} → {end_date}) covers at least 2 trading days."
+            )
         # Ensure timezone-aware UTC to match pipeline DataFrames
         if returns.index.tz is None:
             returns.index = returns.index.tz_localize("UTC")
