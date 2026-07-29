@@ -299,7 +299,7 @@ Outputs in: data/
 - **Separation of concerns.** All modules are independent, testable, and swappable.
 - **Wilder's smoothing (RSI/ATR).** Industry-standard implementation matches Bloomberg/TradingView values.
 - **Newey-West HAC standard errors.** Factor regression t-statistics account for heteroskedasticity and autocorrelation in financial returns.
-
+- **Currency awareness.** Integration with the [ISO 4217 Currency Registry](https://github.com/slimissa/iso4217) ensures all prices are validated against canonical minor unit specifications. Multi-currency portfolios use peg information for fixed-rate pairs, eliminating unnecessary FX API calls for pegged currencies.
 ---
 
 ## Test suite
@@ -343,9 +343,10 @@ Train separate models per regime using the regime labels already produced by the
 | **Phase 6a** | ✅ | Regime filtering — binary gates, per-signal breakers, gating comparison |
 | **Phase 6b** | ✅ | Regime detection — HMM, rule-based, probability-weighted switching |
 | **Phase 7** | ✅ | ML signal — XGBoost/Random Forest, walk-forward validation, leak-proof |
-| **Phase 8** | Planned | Portfolio layer — multi-asset backtest, risk management |
-| **Phase 9** | Planned | Research report — automated tear sheet PDF/DOCX |
-| **Phase 10** | Planned | QuantOS integration — CLI commands via `lass_sh` |
+| **Phase 8** | 📋 | Currency-aware data validation — ISO 4217 minor unit precision checks, peg-aware FX handling, multi-currency portfolio normalization via [iso4217-registry](https://github.com/slimissa/iso4217) |
+| **Phase 9** | 📋 | Portfolio layer — multi-asset backtest, risk management |
+| **Phase 10** | 📋 | Research report — automated tear sheet PDF/DOCX |
+| **Phase 11** | 📋 | QuantOS integration — CLI commands via `lass_sh` |
 
 ---
 
